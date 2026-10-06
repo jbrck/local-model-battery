@@ -24,18 +24,11 @@ This creates a virtualenv, installs requirements, and verifies everything.
 
 ## AI-assisted setup
 
-If you use Hermes Agent, install the companion skill:
+This repo bundles a companion skill (`skill/SKILL.md`) designed to be loaded by any AI assistant. It tells the AI how to guide you through endpoint setup, smoke tests, full benchmarks, and interpreting results.
 
-```bash
-hermes skill install ./skill/
-```
-
-Then tell your AI: "Run the local model battery on my machine." It will guide you through endpoint setup, smoke tests, and full benchmarks.
-
-Or load it directly:
-```bash
-cat skill/SKILL.md | hermes skill create
-```
+To use it with an AI agent:
+- **Hermes Agent:** `hermes skill install ./skill/`
+- **Any other AI:** Share the file directly — or let the AI read `skill/SKILL.md` as a system instruction
 
 ## Usage
 
