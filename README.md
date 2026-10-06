@@ -22,6 +22,21 @@ bash setup.sh
 
 This creates a virtualenv, installs requirements, and verifies everything.
 
+## AI-assisted setup
+
+If you use Hermes Agent, install the companion skill:
+
+```bash
+hermes skill install ./skill/
+```
+
+Then tell your AI: "Run the local model battery on my machine." It will guide you through endpoint setup, smoke tests, and full benchmarks.
+
+Or load it directly:
+```bash
+cat skill/SKILL.md | hermes skill create
+```
+
 ## Usage
 
 You need a running OpenAI-compatible inference server (llama.cpp, vLLM, LiteLLM, Ollama, etc.):
