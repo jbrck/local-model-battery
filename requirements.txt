@@ -1,0 +1,15 @@
+# Local Model Battery
+# pip install -r requirements.txt
+
+# Core: HTTP + retry
+requests>=2.31
+urllib3>=2.2
+
+# Math grading
+sympy>=1.12
+
+# Code execution for HE+ (sandboxed)
+evalplus>=0.1.1
+
+# AST parsing helpers
+astor>=0.8

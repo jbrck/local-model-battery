@@ -1,0 +1,22 @@
+[
+  {"id": "01_exact_word", "prompt": "Respond with only the word BANANA. Output nothing else.", "checker": "exact:banana"},
+  {"id": "02_one_word", "prompt": "Answer with a single word: what color is a clear daytime sky?", "checker": "one_word"},
+  {"id": "03_two_words", "prompt": "Answer using exactly two words: what is the capital of France?", "checker": "two_words"},
+  {"id": "04_three_sents", "prompt": "Write exactly 3 sentences about why hydration matters.", "checker": "three_sentences"},
+  {"id": "05_five_bullets", "prompt": "List exactly 5 benefits of exercise. One per line, each line starting with '- '.", "checker": "five_bullets"},
+  {"id": "06_seven_items", "prompt": "List exactly 7 colors, comma-separated, on a single line.", "checker": "seven_items"},
+  {"id": "07_all_caps", "prompt": "Write the phrase 'weather warning' in all capital letters.", "checker": "all_caps"},
+  {"id": "08_starts_with", "prompt": "Write one sentence about coffee that begins with the word 'Although'.", "checker": "starts_with"},
+  {"id": "09_ends_with", "prompt": "Write one sentence about winter that ends with the word 'silence'.", "checker": "ends_with"},
+  {"id": "10_lowercase", "prompt": "Write the sentence 'THE QUICK BROWN FOX' in all lowercase letters.", "checker": "lowercase"},
+  {"id": "11_no_letter_e", "prompt": "Write one sentence about a dog. It must not contain the letter 'e'.", "checker": "no_e"},
+  {"id": "12_no_commas", "prompt": "Write one sentence about the ocean. It must contain no commas.", "checker": "no_commas"},
+  {"id": "13_max_words", "prompt": "Describe a thunderstorm in 20 words or fewer.", "checker": "max20"},
+  {"id": "14_min_words", "prompt": "Describe a forest in at least 15 words.", "checker": "min15"},
+  {"id": "15_json_schema", "prompt": "Output ONLY valid JSON matching this schema, no other text: {\"city\": string, \"temp_c\": number, \"conditions\": string}. Use Tokyo, 28, \"Sunny\".", "checker": "json"},
+  {"id": "16_haiku", "prompt": "Write a haiku about autumn. Exactly three lines. No other text.", "checker": "three_lines"},
+  {"id": "17_no_digits", "prompt": "Write one sentence about mathematics without using any digits.", "checker": "no_digits"},
+  {"id": "18_exact_phrase", "prompt": "Output exactly this phrase and nothing else: The eagle lands at dawn", "checker": "exact_phrase"},
+  {"id": "19_ends_period", "prompt": "Write one sentence about rain that ends with a period.", "checker": "ends_period"},
+  {"id": "20_single_line", "prompt": "Write the names of three planets on a single line, space-separated. No other text.", "checker": "one_line_three"}
+]

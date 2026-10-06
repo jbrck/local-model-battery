@@ -1,0 +1,12 @@
+[
+  {"id": "ProductBlurb", "prompt": "Write a 60-word marketing blurb for a new productivity app called 'FlowForge' that helps freelancers track projects, invoices, and deadlines in one place. Direct, benefit-driven, no fluff."},
+  {"id": "EmailReply", "prompt": "Write a professional but warm email reply to a client who said: 'We loved your proposal but need a 15% discount and a faster timeline to move forward.' Keep it under 100 words."},
+  {"id": "BlogIntro", "prompt": "Write a 3-sentence blog intro about why small businesses should use AI for customer support. Punchy, no cliches."},
+  {"id": "LinkedInPost", "prompt": "Write a LinkedIn post (under 120 words) announcing a company just hit 10,000 customers. Confident, humble, no hype words like 'game-changer'."},
+  {"id": "PressRelease", "prompt": "Write a 2-paragraph press release announcing a new partnership between a bakery and a local coffee roaster."},
+  {"id": "NewsArticle", "prompt": "Write a 150-word news article about a city launching free public transit on weekends. Neutral, factual tone."},
+  {"id": "OpEd", "prompt": "Write a 120-word op-ed arguing why small towns should invest in public libraries. Persuasive but not preachy."},
+  {"id": "TaglineSet", "prompt": "Write 5 taglines for an electric bike company. Each under 8 words."},
+  {"id": "HowTo", "prompt": "Write a 100-word how-to guide for brewing French press coffee. Clear numbered steps."},
+  {"id": "CustomerTestimonial", "prompt": "Write a 2-sentence customer testimonial for a lawn care service that transformed a neglected yard."}
+]
