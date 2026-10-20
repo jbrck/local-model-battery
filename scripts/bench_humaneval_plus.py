@@ -1,70 +1,90 @@
 #!/usr/bin/env python3
-"""HumanEval+: code generation benchmark with evalplus test harness.
+"""HumanEval+: code generation benchmark, self-contained test runner.
 
-Reads problems from data/humaneval_plus.json, generates solutions, and
-runs official evalplus test suite against each one.
+Reads problems from data/humaneval_plus.json, asks the model to complete each
+function, then runs the bundled test suite for that problem in a subprocess.
+No external evaluation harness required.
 """
-import argparse, json, os, sys, time, traceback
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from __future__ import annotations
 
-from scripts.lib.model import ModelConfig, chat_request
-from scripts.lib.reporting import start_timer, elapsed, save_result, report_stdout
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from scripts.lib.code_exec import run_python_tests  # noqa: E402
+from scripts.lib.model import ModelConfig, chat_request  # noqa: E402
+from scripts.lib.reporting import elapsed, report_stdout, save_result, start_timer  # noqa: E402
 
 SYSTEM = """You are an expert Python developer. Write a solution for the given problem.
 Output ONLY the code, no explanation, no markdown formatting, no imports.
 The solution must be a standalone Python function."""
 
+CODE_FENCE = "```"
+
+
+def strip_fences(text: str) -> str:
+    """Remove a markdown code fence, preserving the code's own indentation."""
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and lines[0].strip().startswith(CODE_FENCE):
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].strip().startswith(CODE_FENCE):
+        lines.pop()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
 
 def run_humaneval(cfg: ModelConfig, data_path: str, limit: int | None = None) -> dict:
-    with open(data_path) as f:
-        problems = json.load(f)
+    """Run HumanEval+ over the data file. Returns pass@1 plus per-task detail."""
+    with open(data_path) as handle:
+        problems = json.load(handle)
     if limit:
         problems = problems[:limit]
-
-    from evalplus.data import get_human_eval_plus
-    from evalplus.evaluate import evaluate  # type: ignore
 
     total = len(problems)
     passed = 0
     results = []
 
-    for i, item in enumerate(problems):
-        task_id = item["task_id"]
-        prompt = item["prompt"]
-        entry_point = item["entry_point"]
-        test = item["test"]
-        imports = item.get("imports", "")
-
-        start_t = time.time()
+    for index, item in enumerate(problems, start=1):
+        started = time.time()
         response = chat_request(cfg, [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": item["prompt"]},
         ], max_tokens=1024, temperature=0.0)
-        elapsed_t = time.time() - start_t
+        elapsed_s = time.time() - started
 
         if response is None:
-            print(f"  [{i+1}/{total}] SKIP (no response)")
+            print(f"  [{index}/{total}] SKIP (no response)")
+            results.append({"task_id": item["task_id"], "passed": False,
+                            "error": "no response", "time_s": round(elapsed_s, 1)})
             continue
 
-        # Build the solution module
-        solution = f"{imports}\n{response}" if imports else response
-        # evalplus evaluate runs the test suite with a sandbox timeout
-        try:
-            result = evaluate(solution, entry_point, test)
-            p = result.get("passed", False)
-        except Exception:
-            p = False
-        if p:
-            passed += 1
-        results.append({"task_id": task_id, "passed": p, "time_s": round(elapsed_t, 1)})
-        print(f"  [{i+1}/{total}] {'✓' if p else '✗'} ({elapsed_t:.1f}s)", flush=True)
+        imports = item.get("imports") or ""
+        completion = strip_fences(response)
+        source = "\n".join(part for part in
+                           (imports, item["prompt"], completion) if part.strip())
+        ok, detail = run_python_tests(source, item["entry_point"], item["test"])
+        passed += int(ok)
+        results.append({"task_id": item["task_id"], "passed": ok,
+                        "error": None if ok else detail, "time_s": round(elapsed_s, 1)})
+        print(f"  [{index}/{total}] {'PASS' if ok else 'FAIL'} ({elapsed_s:.1f}s)"
+              + ("" if ok else f" {detail}"))
+        sys.stdout.flush()
 
-    pass_at_1 = passed / total if total > 0 else 0.0
+    pass_at_1 = passed / total if total else 0.0
     return {"pass_at_1": pass_at_1, "pass_at_1_pct": round(pass_at_1 * 100, 1),
             "n_passed": passed, "n_total": total, "results": results}
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="HumanEval+ benchmark")
     parser.add_argument("--model", required=True)
     parser.add_argument("--endpoint", default="http://localhost:11434/v1")
@@ -79,11 +99,11 @@ def main():
     print(f"HumanEval+ [{args.model}]", flush=True)
     results = run_humaneval(cfg, args.data, args.limit)
     results["_elapsed"] = int(time.time() - timer)
-    results["elapsed"] = elapsed(timer)
     path = save_result("humaneval_plus", args.model, results, args.output_dir)
     report_stdout(results, f"HumanEval+ [{args.model}] done")
     print(f"Saved to {path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

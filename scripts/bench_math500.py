@@ -7,6 +7,8 @@ and grades using sympy-based symbolic math verification.
 import argparse, json, os, re, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from sympy import SympifyError, simplify, sympify
+
 from scripts.lib.model import ModelConfig, chat_request
 from scripts.lib.reporting import start_timer, elapsed, save_result, report_stdout
 
@@ -14,7 +16,6 @@ from scripts.lib.reporting import start_timer, elapsed, save_result, report_stdo
 
 def _extract_boxed(text: str) -> str | None:
     """Extract the content inside the LAST \\boxed{}."""
-    import re
     idx = text.rfind("\\boxed")
     if idx == -1:
         return None
@@ -51,8 +52,6 @@ def _extract_answer(text: str) -> str:
 
 def _grade_answer(gold: str, pred: str) -> bool:
     """Compare gold and predicted answers using sympy simplification."""
-    from sympy import simplify, sympify, SympifyError
-
     gold = _extract_answer(gold.strip())
     pred = _extract_answer(pred.strip())
 

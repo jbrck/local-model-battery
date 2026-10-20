@@ -1,15 +1,16 @@
 ---
 name: local-battery-setup
-description: Use when setting up local model battery. Guide setup.
+description: Use when setting up or running the Local Model Battery on any OpenAI-compatible endpoint. Covers setup, smoke test, full run, writing suite, and how to read results.
 ---
 
-# Local Model Battery Setup
+# Local Model Battery — setup and run
 
-This skill instructs an AI assistant on how to set up and run the [Local Model Battery](https://github.com/jbrck/local-model-battery). Tests: MATH-500, HumanEval+, GPQA-Diamond, Instr v2, Prose ELO.
+Portable procedure. Works with any AI assistant and any OpenAI-compatible
+endpoint. Repo: https://github.com/jbrck/local-model-battery
 
-## Steps
+Tests: MATH-500, HumanEval+, GPQA-Diamond, Instr v2, Writing Suite v1.
 
-### 1. Clone & install
+## 1. Clone and install
 
 ```bash
 git clone https://github.com/jbrck/local-model-battery
@@ -17,56 +18,92 @@ cd local-model-battery
 bash setup.sh
 ```
 
-Pitfall: Python 3.14+ lacks sympy wheels — `pip install sympy --no-binary sympy`.
+If `pip install sympy` fails, the interpreter is too new for the wheels on PyPI —
+use a 3.10-3.12 venv, or `pip install --no-binary sympy sympy`.
 
-### 2. Start model server
+## 2. Confirm the endpoint
 
-The user needs an OpenAI-compatible endpoint running — llama.cpp, vLLM, Ollama, or LiteLLM.
+The user needs an OpenAI-compatible endpoint serving the model under test.
 
 ```bash
-curl http://localhost:11434/v1/chat/completions -d '{"model":"x","messages":[{"role":"user","content":"hi"}]}'
+curl -s http://localhost:11434/v1/models
 ```
 
-### 3. Smoke test (~5 min)
+`--model` must match an id that endpoint actually lists. Benchmarks request
+`chat/completions`; anything that only serves `/completions` will not work.
+
+## 3. Smoke test (~5 min)
 
 ```bash
 source .venv/bin/activate
-python scripts/run_battery.py --model MyModel --endpoint http://localhost:11434/v1 --smoke-only
+python scripts/run_battery.py --model MyModel \
+  --endpoint http://localhost:11434/v1 --smoke-only
 ```
 
-### 4. Full battery (2-6 hours)
+Ten problems per benchmark. If a benchmark warns and continues, fix the endpoint
+before starting a full run — a full run wastes hours on a broken pipe.
+
+## 4. Full mechanical battery (2-6 hours)
 
 ```bash
 python scripts/run_battery.py --model MyModel --endpoint http://localhost:11434/v1
 ```
 
-Order: MATH-500 → HumanEval+ → GPQA-Diamond → Instr v2 → Prose ELO.
+Order: MATH-500, HumanEval+, GPQA-Diamond, Instr v2. Roughly 900 requests total;
+time scales with tokens per second, not with model size directly.
 
-### 5. Prose ELO (optional, needs judge)
+## 5. Writing suite
+
+Generation is separate from scoring, on purpose. Never score during generation.
 
 ```bash
-python scripts/run_battery.py --model MyModel --endpoint http://localhost:11434/v1 \
-  --judge-model hermes-4-70b --judge-endpoint http://judge:11434/v1
+# 1. Generate answers (thin pipe, temperature 0.7, 16k tokens)
+python scripts/bench_writing_generate.py --model MyModel \
+  --endpoint http://localhost:11434/v1 --answers-dir answers
+
+# 2. Blind the corpus (strips model identity, opaque IDs, seeded shuffle)
+python scripts/build_scoring_corpus.py
+
+# 3. Score with a judge that is NOT under test
+python scripts/score_writing.py \
+  --judge-model JudgeAlias --judge-endpoint http://localhost:8080/v1
+
+# 4. Join and report
+python scripts/report_scores.py --scores scoring/scores-<timestamp>.json
 ```
 
-70B+ judge recommended. Use `--skip-prose` if none available.
+The judge needs to be a capable instruction-follower and must not be a model in
+the comparison set. There is no default judge; pass a model explicitly.
 
 ## Pitfalls to tell the user
 
-- **Reasoning models**: Models that output `reasoning_content` burn token budget before visible output. Depresses Instr v2 and Prose scores. Try `--no-think` if the model supports it, or increase token budget.
-- **Flash-attention**: Some architectures lose 10x speed with `-fa on`. Try `-fa off` if the model is unexpectedly slow.
-- **VRAM**: A 30B Q4 model (~20 GB) plus draft model (~3 GB) barely fits 24 GB. Reduce context (`-c 4096`) if the server OOMs.
-- **ELO formula**: The prose ELO uses draw-excluded win rate. Never include draws in the denominator.
-- **HumanEval+ sandbox**: The test harness executes generated code. Sandboxed via subprocess timeout; container recommended for multi-user systems.
+- **Reasoning models burn the budget before visible output.** The mechanical
+  benchmarks use tight token caps, so a model that thinks first can score low on
+  Instr v2 while being perfectly capable. That is measured behavior, not a harness
+  bug. The writing suite gives 16k tokens for the same reason.
+- **Empty content channel scores empty.** The writing leg scores `content` only. A
+  model that answers inside `reasoning_content` records as empty. Do not "fix" it
+  by raising tokens — it is a real difference in behavior.
+- **HumanEval+ runs generated code.** It runs in a subprocess with a 10s timeout in
+  a temp directory. That is time-boxing, not a security sandbox. Use a disposable
+  machine or a container for models you do not trust.
+- **Do not compare scores across suite versions.** A rubric or task change is a
+  version bump; prior scores no longer apply.
+- **Do not use pairwise ELO for writing.** It was retired: the first-slot answer won
+  75% of decided verdicts. Use the writing suite.
 
-## Interpreting results
+## Reading results
 
-| Test | 7B | 27B | 70B | Notes |
-|---|---|---|---|---|
-| MATH-500 | 60-75% | 80-90% | 85-92% | Qwen variants dominate |
-| HE+ | 60-75% | 85-95% | 85-92% | Coding harder for small models |
-| GPQA-D | 35-45% | 45-55% | 50-60% | 34% is random baseline |
-| Instr v2 | 14-17/20 | 16-19/20 | 17-20/20 | Few hit 20/20 |
-| Prose ELO | 1000-1300 | 1400-1700 | 1600-1900 | Qwen3.8 variants top local |
+| Test | Random baseline | Typical range | Notes |
+|---|---|---|---|
+| MATH-500 | ~0% | 60-92% | Small models lose on multi-step algebra |
+| HumanEval+ | ~0% | 60-95% | Below 60% usually means truncation or format |
+| GPQA-Diamond | 25% (4 choices) | 35-60% | Anything near 25% is noise |
+| Instr v2 | 0% | 14-20 of 20 | Exact-constraint tasks; few hit 20 |
+| Writing Suite v1 | 1.0 (rubric floor) | 4-7 typical | Absolute 1-10 mean, blind judge |
 
-Results save to `results/` as timestamped JSON. The orchestrator also creates `summary-{model}-{ts}.json`.
+Writing scores are absolute rubric means, not rankings. They are comparable to
+other runs on the same suite version and judge only.
+
+Results save to `results/` as timestamped JSON; the orchestrator also writes
+`summary-{model}-{timestamp}.json`.
