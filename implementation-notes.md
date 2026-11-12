@@ -139,3 +139,15 @@ against existing reference rows.
   CRAP). Failures span legacy scripts (`report_scores.py`, `validate_suite.py`,
   `score_writing.py`, `build_scoring_corpus.py`) and the new leg scripts, whose error
   branches are thin. Not addressed in this pass; `--changed` is the per-commit mode.
+
+## Open questions carry their measured cost (2026-11-12)
+
+- Every decision that needs the operator now prints the measured effect from `variables.toml`
+  next to it, so the sheet says what choosing differently costs rather than only which knobs
+  exist. Rows the standard owns stay quiet; repeating the catalog at all 47 of them would bury
+  the two or three that matter.
+- `thinking` becomes an operator question when the weights do not fit the card: on is the
+  standard, off is a different measurement, and the row carries both the measured cost of the
+  switch and the reason (spilled weights pay RAM bandwidth for every reasoning token).
+- A window limited below lcb's budget now names lcb and says what it breaks: below 114688 plus
+  headroom that leg stops at the context limit instead of scoring what its cap allows.

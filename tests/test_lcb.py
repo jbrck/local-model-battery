@@ -101,6 +101,14 @@ class PhasesTest(LegTest):
             lcb.main()
         self.assertTrue(os.path.exists(os.path.join(self.out, "lcb.result.json")))
 
+    def test_an_empty_dataset_is_not_run(self):
+        empty = os.path.join(self.tmp.name, "empty.jsonl")
+        with open(empty, "w") as handle:
+            handle.write("\n")
+        block = self.run_leg("--data", empty)
+        self.assertEqual(block["status"], "not run")
+        self.assertEqual(block["notes"], [f"no problems in {empty}"])
+
 
 class ResumeTest(LegTest):
     def test_finished_problems_are_not_asked_again(self):
@@ -134,6 +142,27 @@ class GuardTest(LegTest):
         self.assertEqual(block["no_code"], 2)
         self.assertEqual(block["scored"], 0)
         self.assertEqual(block["status"], "fail")
+
+    def test_a_failing_scorer_fails_the_leg(self):
+        broken = os.path.join(self.tmp.name, "broken_scorer.py")
+        with open(broken, "w") as handle:
+            handle.write("#!/bin/sh\nexit 3\n")
+        os.chmod(broken, 0o755)
+        block = self.run_leg("--scorer-python", broken)
+        self.assertEqual(block["scored"], 0)
+        self.assertEqual(block["status"], "fail")
+        self.assertIn("scorer exited 3", block["errors"])
+
+    def test_a_problem_missing_from_the_detail_scores_as_failed(self):
+        sparse = os.path.join(self.tmp.name, "sparse_scorer.py")
+        with open(sparse, "w") as handle:
+            handle.write("#!/usr/bin/env python3\n"
+                         "import json, sys\n"
+                         "json.dump({'pass@1': 0.0, 'detail': {}}, open(sys.argv[3], 'w'))\n")
+        os.chmod(sparse, 0o755)
+        block = self.run_leg("--scorer-python", sparse)
+        self.assertEqual(block["scored"], 2)
+        self.assertEqual(block["correct"], 0)
 
     def test_the_stall_guard_fires_after_quiet_minutes(self):
         guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)

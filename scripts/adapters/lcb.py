@@ -218,9 +218,41 @@ def score(problems: list[dict], done: dict[str, dict],
         detail = json.load(handle).get("detail", {})
     passed = {}
     for index, (qid, _code) in enumerate(scorable):
-        value = detail.get(str(index), detail.get(index, 0.0))
-        passed[qid] = float(value or 0.0) > 0.5
+        passed[qid] = float(detail.get(str(index)) or 0.0) > 0.5
     return passed, None
+
+
+def count_scored(problems: list[dict], passed: dict[str, bool], tally: harness.Tally) -> None:
+    """Fold the scorer's verdicts into the tally, in problem order."""
+    for problem in problems:
+        qid = str(problem["question_id"])
+        if qid in passed:
+            tally.scored += 1
+            tally.correct += int(passed[qid])
+
+
+def record_outcome(done: dict[str, dict], problem_count: int, stop: str | None,
+                   accuracy: float, extra: dict) -> None:
+    """Put the generation counters and any guard stop into the extra block."""
+    extra["generated"] = len(done)
+    extra["ungenerated"] = problem_count - len(done)
+    extra["no_code"] = sum(1 for record in done.values() if not record.get("code"))
+    extra["pass_at_1"] = round(accuracy, 4)
+    if stop:
+        extra["aborted"] = True
+        extra["abort_reason"] = stop
+
+
+def run_phases(problems: list[dict], args: LcbArgs, tally: harness.Tally, extra: dict) -> None:
+    """Generate, score, and fold both phases into the tally and the extra block."""
+    done, stop = generate(problems, load_helpers(args.src), harness.leg_config(args),
+                          args, tally)
+    passed, score_error = score(problems, done, args)
+    count_scored(problems, passed, tally)
+    if score_error and any(record.get("code") for record in done.values()):
+        tally.errors.append(score_error)
+        tally.failed += 1
+    record_outcome(done, len(problems), stop, tally.accuracy, extra)
 
 
 def run(args: LcbArgs) -> dict:
@@ -231,23 +263,7 @@ def run(args: LcbArgs) -> dict:
     if not problems:
         tally.notes.append(f"no problems in {args.data}")
     else:
-        done, stop = generate(problems, load_helpers(args.src), harness.leg_config(args),
-                              args, tally)
-        passed, score_error = score(problems, done, args)
-        for problem in problems:
-            qid = str(problem["question_id"])
-            if qid in passed:
-                tally.scored += 1
-                tally.correct += int(passed[qid])
-        if score_error:
-            tally.errors.append(score_error)
-        extra["generated"] = len(done)
-        extra["ungenerated"] = len(problems) - len(done)
-        extra["no_code"] = sum(1 for record in done.values() if not record.get("code"))
-        extra["pass_at_1"] = round(tally.accuracy, 4)
-        if stop:
-            extra["aborted"] = True
-            extra["abort_reason"] = stop
+        run_phases(problems, args, tally, extra)
     return harness.finish(LEG_ID, args, tally, extra=extra)
 
 

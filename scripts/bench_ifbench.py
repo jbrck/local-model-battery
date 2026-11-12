@@ -303,12 +303,12 @@ def resolve_checker(python_exe: str, nltk_dir: str):
     return checker, None
 
 
-def run_probe(python_exe: str):
+def run_probe(python_exe: str, timeout: float = 120):
     """Run the verifier probe; returns (stdout_text | None, reason | None)."""
     try:
         result = subprocess.run([python_exe, "-c", PROBE_SRC],
                                 capture_output=True, text=True,
-                                timeout=120)
+                                timeout=timeout)
     except OSError as exc:
         return None, f"--ifbench-python {python_exe!r} does not exist ({exc})"
     except subprocess.TimeoutExpired:

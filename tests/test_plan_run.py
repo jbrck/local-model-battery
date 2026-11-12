@@ -109,6 +109,41 @@ class FitAndWindowTest(unittest.TestCase):
         self.assertEqual(footprint.kv_bytes_per_token, 131072)
 
 
+class MeasuredCostTest(unittest.TestCase):
+    """An open question has to say what each answer costs, not just that a question exists."""
+
+    BUSY = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 11264, 350.0),), ram_total_gb=64.0,
+                     ram_available_gb=60.0, tools=TOOLS)
+
+    def test_a_question_the_operator_owns_carries_the_measured_cost(self):
+        row = decision(plan(FITS, host=self.BUSY), "thinking")
+        self.assertTrue(row.needs_operator)
+        self.assertIn("Measured:", row.consequence)
+        self.assertIn("28.3", row.consequence)
+
+    def test_a_row_the_standard_owns_carries_no_measured_text(self):
+        row = decision(plan(FITS), "temperature")
+        self.assertFalse(row.needs_operator)
+        self.assertNotIn("Measured:", row.consequence)
+
+    def test_thinking_is_asked_only_when_the_weights_miss_the_card(self):
+        self.assertFalse(decision(plan(FITS), "thinking").needs_operator)
+        options = decision(plan(FITS, host=self.BUSY), "thinking").options
+        self.assertEqual([item.label for item in options], ["keep thinking on", "turn it off"])
+        self.assertIn("off-standard", options[1].consequence)
+
+    def test_a_model_that_barely_fits_is_asked_about_its_window(self):
+        fat = dict(FITS)
+        fat["weights_gb"] = 20.0
+        result = plan(fat)
+        self.assertEqual(result.fit.tier, "T1")
+        self.assertLess(result.fit.max_ctx, 131072)
+        row = decision(result, "ctx")
+        self.assertTrue(row.needs_operator)
+        self.assertIn("lcb", row.consequence)
+        self.assertIn("context limit", row.consequence)
+
+
 class CapTest(unittest.TestCase):
     def test_a_standard_cap_wider_than_the_window_is_clamped_and_reported(self):
         tight = copy.deepcopy(STANDARD)

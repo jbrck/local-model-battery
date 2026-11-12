@@ -39,8 +39,8 @@ class Guard:
         """Seconds left in the wall-clock budget, floored at zero."""
         return max(0.0, self.max_hours * 3600 - (now - self.started_at))
 
-    def record(self, kind: FailureKind, now: float) -> GuardDecision:
-        """Account for one finished problem and rule on whether to keep going."""
+    def _account(self, kind: FailureKind, now: float) -> None:
+        """Update the streaks and the last-code timestamp for one finished problem."""
         if kind is FailureKind.ENGINE:
             self.engine_streak += 1
             self.no_code_streak = 0
@@ -51,6 +51,9 @@ class Guard:
             self.engine_streak = 0
             self.no_code_streak = 0
             self.last_code_at = now
+
+    def _verdict(self, now: float) -> GuardDecision:
+        """Rule on the counters as they stand after one problem."""
         if self.engine_streak >= self.max_failures:
             return GuardDecision(True, f"{self.engine_streak} consecutive engine failures")
         if self.no_code_streak >= self.max_failures:
@@ -61,3 +64,8 @@ class Guard:
         if self.stall_min > 0 and now - self.last_code_at >= self.stall_min * 60:
             return GuardDecision(True, f"stall: no extractable code for {self.stall_min} minutes")
         return GuardDecision(False)
+
+    def record(self, kind: FailureKind, now: float) -> GuardDecision:
+        """Account for one finished problem and rule on whether to keep going."""
+        self._account(kind, now)
+        return self._verdict(now)

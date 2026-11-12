@@ -7,7 +7,7 @@ ignores the thinking flag -- arrives here as an option with its consequence atta
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from scripts.lib.config import get_dotted, resolve_md5
 from scripts.lib.env_probe import HostFacts
@@ -444,6 +444,10 @@ def plan_ctx(standard: dict, fit: Fit, footprint: Footprint,
     else:
         detail += (f"; the largest planned leg needs {needed}, so caps are clamped to keep the "
                    f"prompt inside the window")
+    lcb_cap = _digit(get_dotted(standard, "caps.lcb", 0), 0)
+    if lcb_cap and lcb_cap == largest_cap and fit.max_ctx < needed:
+        detail += (f"; lcb is the leg that needs {needed}, so at {fit.max_ctx} it stops at the "
+                   f"context limit instead of scoring what its cap allows")
     options = (
         Option(f"run at {fit.max_ctx} tokens",
                f"stamp ctx={fit.max_ctx}, off-standard; keep it for every run on this shape of "
@@ -646,6 +650,28 @@ def measurement_decisions(inputs: _PlanInputs) -> list[Decision]:
     return [row for row in decisions if row is not None]
 
 
+def _effect(inputs: _PlanInputs, variable_id: str) -> str:
+    """The measured consequence of getting this knob wrong, straight from the catalog."""
+    item = variables_by_id(inputs.variables).get(variable_id)
+    return item.effect if item else ""
+
+
+def _with_effects(decisions: list[Decision], inputs: _PlanInputs) -> list[Decision]:
+    """Put the measured cost next to every open question, so the operator can weigh it.
+
+    Only questions that need the operator carry it. The other rows are the standard talking,
+    and repeating the whole catalog at them would bury the two or three that matter.
+    """
+    out: list[Decision] = []
+    for item in decisions:
+        body = _effect(inputs, item.variable.split(":", 1)[0]) if item.needs_operator else ""
+        if not body or body in item.consequence:
+            out.append(item)
+            continue
+        out.append(replace(item, consequence=f"{item.consequence}. Measured: {body}"))
+    return out
+
+
 def _ctx_row(inputs: _PlanInputs) -> Decision | None:
     """The window, unless plan_ctx already put the question to the operator."""
     if inputs.ctx_asked or inputs.ctx != _pinned_int(inputs.standard, "ctx"):
@@ -684,6 +710,19 @@ def _thinking_decision(inputs: _PlanInputs) -> Decision:
             Option("run in the on column", f"the endpoint ignores the switch ({why}); stamp "
                    "thinking=native-forced", recommended=True),
             Option("switch endpoints", "point the run at a server that honours the flag"),
+        )
+    elif requested == THINKING_STANDARD and inputs.footprint.known and inputs.fit.tier != "T1":
+        # The model does not fit the card, so every reasoning token is paid for in RAM
+        # bandwidth as well as time. That is the case the operator has to decide, not the
+        # standard: on is the standard, off is a different measurement.
+        options = (
+            Option("keep thinking on",
+                   f"stays on-standard; the weights do not fit the card ({inputs.fit.reason}), "
+                   f"so the reasoning tokens cost RAM bandwidth on top of wall clock",
+                   recommended=True),
+            Option("turn it off",
+                   "stamp thinking=off, off-standard: shorter cases on a box that is already "
+                   "spilling, at the cost measured here"),
         )
     return Decision("thinking", KIND_MEASUREMENT, requested if honors else "native",
                     THINKING_STANDARD,
@@ -809,6 +848,7 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
     decisions = ([ctx_decision] if ctx_decision else []) + leg_decisions
     decisions.extend(capacity_decisions(inputs))
     decisions.extend(measurement_decisions(inputs))
+    decisions = _with_effects(decisions, inputs)
     return RunPlan(
         standard_version=str(standard.get("standard_version", "unknown")),
         model=str(profile.get("id") or profile.get("name") or "unnamed-model"),

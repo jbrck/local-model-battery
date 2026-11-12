@@ -61,19 +61,24 @@ Four parts. Read them in this order.
 fits_with_offload` means weights spill to RAM, the window is the engine's call, and the same
 profile behaves differently on a box with more VRAM. `T3`/`T4` mean slow or will not run.
 
-**Decisions that need you** are the ones this host forces. Each carries its options and what
-each option costs:
+**Decisions that need you** are the ones this host forces. Each carries its options, what each
+option costs, and the measured effect of getting it wrong — the numbers behind that come from
+`variables.toml`, not from the planner's opinion:
 
 - `ctx assumed 131072` — the profile has no shape, so the window is the engine's call. Serve,
   read `/props`, re-plan.
 - `ctx here N` — the standard window does not fit (weights + KV at 131072 exceeds free VRAM).
   Either accept N and stamp the run off-standard, or move to a smaller quant, or move to a
-  bigger card. Do not raise the cap to compensate: that is a different test.
+  bigger card. Do not raise the cap to compensate: that is a different test. When `lcb` is the
+  leg that needs the widest window, the row says so: below its 114688-token budget that leg
+  stops at the context limit rather than scoring what its cap allows.
 - `cap:<leg> N` — the leg's standard cap does not fit the window, so it drops to N. A capped leg
   reports cap hits, and a capped run is a floor rather than a result.
-- `thinking:<leg>` — the endpoint has no switch, or the flag did not change the token count.
-  Thinking off on a leg that needs it costs points; thinking on where it is not needed costs
-  wall clock and can still move the score.
+- `thinking` — the endpoint has no switch, the flag did not change the token count, or the
+  weights do not fit the card. The last case is the one to think about: when the model spills
+  to RAM, every reasoning token costs bandwidth as well as wall clock, so the sheet offers
+  on (standard) against off (off-standard, cheaper cases). Thinking off on a leg that needs it
+  costs points; thinking on where it is not needed costs wall clock and can still move the score.
 - `prereq:<leg>` — an external harness or datum is absent, so the leg is skipped rather than
   scored zero. Skipped is visible in the manifest; zero is a lie.
 
@@ -195,6 +200,26 @@ Ask the planner what a host will actually run before starting a 14-leg day. Ever
     python3 scripts/plan_run.py --profile profiles/<name>.toml --no-probe --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['legs']),'run,',len(d['skips']),'skipped'); [print('  skip', s['leg'], '-', s['reason']) for s in d['skips']]"
 
 On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing stays out until a judge model is configured, which is the one gap no env var closes.
+
+## A leg that says in_repo is not a ported leg
+
+`legs.toml`'s `implementation` field is a claim. Before trusting a leg or handing the file to someone as a pattern, confirm it is actually on the v2 contract:
+
+```bash
+for f in scripts/bench_*.py scripts/adapters/*.py; do
+  printf "%-38s harness=%s result_block=%s\n" "$f" \
+    "$(grep -c 'lib.harness\|from lib import harness' "$f")" \
+    "$(grep -c 'RESULT_SUFFIX\|result.json' "$f")"
+done
+```
+
+Zero on either line means a v1 script: it imports `scripts.lib.reporting`, parses its own flags and writes no result block. A run reaches it and fails late, which is the opposite of what the gate leg is for. Port it, or flip the flag to `port_pending` so the planner reports it as skipped instead.
+
+Once every leg is on the contract, `scripts/lib/reporting.py` and `scripts/lib/model.chat_request` are dead. Delete them rather than leaving two result conventions in the tree.
+
+## Gate scoping while legs are mid-port
+
+The full gauntlet carries pre-existing complexity failures from the v1 scripts (the worst sits around CC 34). Gate on `--changed`, or grep the report for the files you touched, and leave the legacy failures alone. A port that splits a long if-chain into small functions clears its own file without touching anyone else's.
 
 ## Pitfalls
 
