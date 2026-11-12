@@ -1,118 +1,180 @@
 #!/usr/bin/env python3
-"""Instruction-following battery v2 — ONE constraint per test, mechanically checked.
+"""Instruction-following battery v2: one mechanical constraint per item.
 
-20 tests with objective pass/fail. Reads tasks from data/instr_v2_tasks.json.
+20 items in data/instr_v2_tasks.json, each naming a checker; grading is a
+table lookup over the exact per-constraint rules this leg has always used.
 """
-import argparse, json, os, re, sys, time
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.lib.model import ModelConfig, chat_request
-from scripts.lib.reporting import start_timer, elapsed, save_result, report_stdout
+from scripts.lib import harness  # noqa: E402
+from scripts.lib.harness import LegArgs, Tally  # noqa: E402
+
+LEG_ID = "instr_v2"
+DEFAULT_DATA = "data/instr_v2_tasks.json"
+JSON_KEYS = ("city", "temp_c", "conditions")
+SENTENCE_SPLIT = re.compile(r"[.!?]+")
 
 
-def check(test_id: str, checker: str, response: str) -> bool:
-    """Check a single constraint. Returns True if the response passes."""
-    text = response.strip()
-
-    if checker == "exact:banana":
-        return text == "BANANA"
-    elif checker == "one_word":
-        return len(text.split()) == 1
-    elif checker == "two_words":
-        return len(text.split()) == 2
-    elif checker == "three_sentences":
-        sentences = [s for s in re.split(r'[.!?]+', text) if s.strip()]
-        return len(sentences) == 3
-    elif checker == "five_bullets":
-        bullets = [l for l in text.split("\n") if l.strip().startswith("-")]
-        return len(bullets) == 5
-    elif checker == "seven_items":
-        items = [x.strip() for x in text.split(",")]
-        return len(items) == 7
-    elif checker == "all_caps":
-        return text == text.upper()
-    elif checker == "starts_with":
-        return text.lower().startswith("although")
-    elif checker == "ends_with":
-        return text.lower().rstrip(".").endswith("silence")
-    elif checker == "lowercase":
-        return text == text.lower() and "the quick brown fox" in text.lower()
-    elif checker == "no_e":
-        return "e" not in text.lower()
-    elif checker == "no_commas":
-        return "," not in text
-    elif checker == "max20":
-        return len(text.split()) <= 20
-    elif checker == "min15":
-        return len(text.split()) >= 15
-    elif checker == "json":
-        try:
-            obj = json.loads(text)
-            return all(k in obj for k in ["city", "temp_c", "conditions"])
-        except (json.JSONDecodeError, TypeError):
-            return False
-    elif checker == "three_lines":
-        return len([l for l in text.split("\n") if l.strip()]) == 3
-    elif checker == "no_digits":
-        return not any(c.isdigit() for c in text)
-    elif checker == "exact_phrase":
-        return text.rstrip(".") == "The eagle lands at dawn"
-    elif checker == "ends_period":
-        return text.rstrip().endswith(".")
-    elif checker == "one_line_three":
-        words = text.split()
-        return len(words) == 3 and not text.startswith("-") and "\n" not in text
-
-    return False
+def _exact_banana(text: str) -> bool:
+    return text == "BANANA"
 
 
-def run_instr(cfg: ModelConfig, data_path: str) -> dict:
-    with open(data_path) as f:
-        tasks = json.load(f)
-
-    passed = 0
-    total = len(tasks)
-    results = []
-    for item in tasks:
-        tid = item["id"]
-        prompt = item["prompt"]
-        checker = item["checker"]
-
-        response = chat_request(cfg, [
-            {"role": "user", "content": prompt},
-        ], max_tokens=400, temperature=0.0)
-
-        if response is None:
-            response = ""
-        p = check(tid, checker, response)
-        if p:
-            passed += 1
-        results.append({"id": tid, "passed": p, "response": response[:80]})
-        print(f"  {tid:20s} {'✓' if p else '✗'}")
-        sys.stdout.flush()
-
-    return {"n_passed": passed, "n_total": total,
-            "score_pct": round(passed / total * 100, 1) if total > 0 else 0.0,
-            "score": f"{passed}/{total}"}
+def _one_word(text: str) -> bool:
+    return len(text.split()) == 1
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Instruction-following v2 benchmark")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
-    parser.add_argument("--api-key", default="not-needed")
-    parser.add_argument("--data", default="data/instr_v2_tasks.json")
-    parser.add_argument("--output-dir", default="results")
-    args = parser.parse_args()
+def _two_words(text: str) -> bool:
+    return len(text.split()) == 2
 
-    cfg = ModelConfig(name=args.model, endpoint=args.endpoint, api_key=args.api_key)
-    timer = start_timer()
-    print(f"Instr v2 [{args.model}]", flush=True)
-    results = run_instr(cfg, args.data)
-    results["_elapsed"] = int(time.time() - timer)
-    path = save_result("instr_v2", args.model, results, args.output_dir)
-    report_stdout(results, f"Instr v2 [{args.model}] done")
-    print(f"Saved to {path}")
+
+def _three_sentences(text: str) -> bool:
+    sentences = [s for s in SENTENCE_SPLIT.split(text) if s.strip()]
+    return len(sentences) == 3
+
+
+def _five_bullets(text: str) -> bool:
+    bullets = [line for line in text.split("\n") if line.strip().startswith("-")]
+    return len(bullets) == 5
+
+
+def _seven_items(text: str) -> bool:
+    items = [item.strip() for item in text.split(",")]
+    return len(items) == 7
+
+
+def _all_caps(text: str) -> bool:
+    return text == text.upper()
+
+
+def _starts_with(text: str) -> bool:
+    return text.lower().startswith("although")
+
+
+def _ends_with(text: str) -> bool:
+    return text.lower().rstrip(".").endswith("silence")
+
+
+def _lowercase(text: str) -> bool:
+    return text == text.lower() and "the quick brown fox" in text.lower()
+
+
+def _no_e(text: str) -> bool:
+    return "e" not in text.lower()
+
+
+def _no_commas(text: str) -> bool:
+    return "," not in text
+
+
+def _max20(text: str) -> bool:
+    return len(text.split()) <= 20
+
+
+def _min15(text: str) -> bool:
+    return len(text.split()) >= 15
+
+
+def _json(text: str) -> bool:
+    try:
+        obj = json.loads(text)
+        return all(key in obj for key in JSON_KEYS)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _three_lines(text: str) -> bool:
+    lines = [line for line in text.split("\n") if line.strip()]
+    return len(lines) == 3
+
+
+def _no_digits(text: str) -> bool:
+    return not any(char.isdigit() for char in text)
+
+
+def _exact_phrase(text: str) -> bool:
+    return text.rstrip(".") == "The eagle lands at dawn"
+
+
+def _ends_period(text: str) -> bool:
+    return text.rstrip().endswith(".")
+
+
+def _one_line_three(text: str) -> bool:
+    words = text.split()
+    return len(words) == 3 and not text.startswith("-") and "\n" not in text
+
+
+CHECKERS = {
+    "exact:banana": _exact_banana,
+    "one_word": _one_word,
+    "two_words": _two_words,
+    "three_sentences": _three_sentences,
+    "five_bullets": _five_bullets,
+    "seven_items": _seven_items,
+    "all_caps": _all_caps,
+    "starts_with": _starts_with,
+    "ends_with": _ends_with,
+    "lowercase": _lowercase,
+    "no_e": _no_e,
+    "no_commas": _no_commas,
+    "max20": _max20,
+    "min15": _min15,
+    "json": _json,
+    "three_lines": _three_lines,
+    "no_digits": _no_digits,
+    "exact_phrase": _exact_phrase,
+    "ends_period": _ends_period,
+    "one_line_three": _one_line_three,
+}
+
+
+def check(checker: str, response: str) -> bool:
+    """Grade one response against its named constraint. Unknown checkers fail."""
+    rule = CHECKERS.get(checker)
+    return bool(rule and rule(response.strip()))
+
+
+def items_hash(items: list[dict]) -> str:
+    """The comparability stamp over exactly these items."""
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def run_instr(cfg, items: list[dict], args: LegArgs) -> Tally:
+    """One ask per item, graded by the item's checker, counted in the tally."""
+    tally = Tally()
+    for item in items:
+        messages = [{"role": "user", "content": item["prompt"]}]
+        response = harness.ask(cfg, messages, args)
+        if response.ok:
+            passed = check(item["checker"], response.answer() or "")
+            tally.record(response, correct=passed)
+            mark = "\u2713" if passed else "\u2717"
+        else:
+            tally.record(response)
+            mark = "!"
+        print(f"  {item['id']:20s} {mark}", flush=True)
+    return tally
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = harness.parse_leg_args(
+        "Instruction-following v2: one mechanical constraint per item.",
+        default_data=DEFAULT_DATA, argv=argv)
+    items = harness.load_items(args.data, limit=args.limit)
+    if not items:
+        return
+    cfg = harness.leg_config(args)
+    tally = run_instr(cfg, items, args)
+    harness.finish(LEG_ID, args, tally, extra={"items_sha": items_hash(items)})
 
 
 if __name__ == "__main__":

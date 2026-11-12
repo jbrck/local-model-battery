@@ -28,6 +28,11 @@ DEFAULT_SEED = 42
 DEFAULT_TEMPERATURE = 0.0
 THINKING_OFF_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 
+# What a leg points at when no --endpoint is given. The test package sets this to a dead
+# port, so a leg test that forgets the flag fails at once instead of quietly calling
+# whatever happens to be listening on the operator's machine.
+DEFAULT_ENDPOINT = os.environ.get("BATTERY_DEFAULT_ENDPOINT", "http://localhost:11434/v1")
+
 # A runaway is the model failing to stop: the same stretch of text over and over. Twelve
 # tokens repeated three times is long enough that prose will not trip it by accident.
 RUNAWAY_GRAM = 12
@@ -42,7 +47,7 @@ class LegArgs:
     """The arguments every leg takes, in the order they matter to an operator."""
 
     model: str
-    endpoint: str = "http://localhost:11434/v1"
+    endpoint: str = DEFAULT_ENDPOINT
     api_key: str = "not-needed"
     data: str = ""
     output_dir: str = "results"
@@ -59,7 +64,7 @@ class LegArgs:
 def add_leg_args(parser: argparse.ArgumentParser, default_data: str = "") -> None:
     """Register the shared leg flags on a parser. Legs with their own flags add them after."""
     parser.add_argument("--model", required=True, help="model name the endpoint serves")
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--api-key", default="not-needed")
     parser.add_argument("--data", default=default_data, help="items file for this leg")
     parser.add_argument("--output-dir", default="results")

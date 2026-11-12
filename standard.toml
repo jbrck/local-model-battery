@@ -131,6 +131,34 @@ items = 138
 source = "Original"
 license = "MIT"
 
+[[data.bundled]]
+file = "data/ifbench_prompts.json"
+sha256_16 = "8488fb465bb46bad"
+items = 300
+source = "allenai/IFBench_test"
+license = "Apache-2.0"
+
+[[data.bundled]]
+file = "data/mmlu_test.json"
+sha256_16 = "8a1aee0d5e09a6b4"
+items = 500
+source = "cais/mmlu test split, sampled"
+license = "MIT"
+
+[[data.bundled]]
+file = "data/reasoning_tasks.json"
+sha256_16 = "3a9060b7137a20ee"
+items = 8
+source = "Original"
+license = "MIT"
+
+[[data.bundled]]
+file = "data/refusal_prompts.json"
+sha256_16 = "117bede039349688"
+items = 70
+source = "Original"
+license = "MIT"
+
 # Sources this repo does not redistribute. `path_env` overrides `path` when set.
 
 [[data.external]]

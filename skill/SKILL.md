@@ -172,6 +172,30 @@ field and produce empty `content` when the budget runs out mid-thought.
 - **Empty content loses pairwise.** A judge counts an empty output as a loss, so a model can beat
   another empty-output model and inflate its ELO. Report head-to-head draws honestly.
 
+## Pointing the battery at this host's data
+
+The frozen standard holds no machine paths. Four legs need data the repo does not redistribute, and each has an env override, so a host that owns the data sets the variable instead of editing the standard.
+
+| Variable | Points at | On Badger-001 |
+|---|---|---|
+| `LCB_DATA` | `release_v6` lite jsonl, 175 problems | `/mnt/data/lcb-data/test6.jsonl` (134 MB, read in place, never copied into the repo) |
+| `LCB_SRC` | LiveCodeBench checkout carrying `lcb_runner` | `/mnt/data/lcb-src/LiveCodeBench` |
+| `NLTK_DATA` | punkt/wordnet corpora the IFBench checkers need | `/mnt/data/benchmark-venv/nltk_data` |
+| `PATH` | `tool-eval-bench` (ifeval, toolbench) and `benchlocal-cli` (hermesagent20) | prepend `/mnt/data/benchmark-venv/bin` |
+
+The benchmark interpreter carries `nltk`, `ifbench` and the lcb scorer's dependencies: `/mnt/data/benchmark-venv/bin/python3`.
+
+    export LCB_DATA=/mnt/data/lcb-data/test6.jsonl
+    export LCB_SRC=/mnt/data/lcb-src/LiveCodeBench
+    export NLTK_DATA=/mnt/data/benchmark-venv/nltk_data
+    export PATH=/mnt/data/benchmark-venv/bin:$PATH
+
+Ask the planner what a host will actually run before starting a 14-leg day. Every leg that cannot run names its own reason:
+
+    python3 scripts/plan_run.py --profile profiles/<name>.toml --no-probe --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['legs']),'run,',len(d['skips']),'skipped'); [print('  skip', s['leg'], '-', s['reason']) for s in d['skips']]"
+
+On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing stays out until a judge model is configured, which is the one gap no env var closes.
+
 ## Pitfalls
 
 - **One leg at a time.** Never two on the same GPU. Contention corrupts both numbers.

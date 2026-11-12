@@ -1,79 +1,88 @@
 #!/usr/bin/env python3
-"""GPQA-Diamond: graduate-level science QA.
+"""GPQA-Diamond: graduate-level science questions, graded by answer letter."""
+from __future__ import annotations
 
-Reads questions from data/gpqa_diamond.json (hendrydong mirror), sends each
-to the model endpoint with answer options, and checks for the correct letter.
-"""
-import argparse, json, os, re, sys, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import re
+import sys
 
-from scripts.lib.model import ModelConfig, chat_request
-from scripts.lib.reporting import start_timer, elapsed, save_result, report_stdout
+from scripts.lib.harness import (LegArgs, Tally, ask, finish, is_cap_hit,
+                                 leg_config, load_items, parse_leg_args)
+from scripts.lib.model import ChatResponse
 
-SYSTEM = "Answer the multiple-choice question. Reply with ONLY the letter of the correct answer (A, B, C, or D). No explanation."
+LEG_ID = "gpqa_diamond"
+DEFAULT_DATA = "data/gpqa_diamond.json"
+SYSTEM = ("Answer the multiple-choice question. Reply with ONLY the letter of "
+          "the correct answer (A, B, C, or D). No explanation.")
+LETTER_PATTERN = r"\b([ABCD])\b"
 
 
-def run_gpqa(cfg: ModelConfig, data_path: str, limit: int | None = None) -> dict:
-    with open(data_path) as f:
-        problems = json.load(f)
-    if limit:
-        problems = problems[:limit]
+def extract_letter(text: str) -> str:
+    """The first standalone A-D letter after v1 normalization, or '?'."""
+    normalized = text.strip().upper().replace(".", "")
+    match = re.search(LETTER_PATTERN, normalized)
+    return match.group(1) if match else "?"
 
-    correct = 0
-    total = len(problems)
-    details = []
 
-    for i, item in enumerate(problems):
-        prompt = item["question"]
-        gold = item["answer"].strip().upper()
-        start_t = time.time()
-        response = chat_request(cfg, [
+def grade(response: ChatResponse, gold: str) -> tuple[bool | None, str, str]:
+    """Score one reply: (correct, predicted letter, channel).
+
+    A reply that only thinks, with empty content, is empty, not wrong.
+    """
+    text = response.content
+    if not text:
+        return None, "", "empty"
+    predicted = extract_letter(text)
+    return predicted == gold, predicted, "content"
+
+
+def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
+    """Ask every item and tally the letter matches."""
+    tally = Tally()
+    rows: list[dict] = []
+    cfg = leg_config(args)
+    items = load_items(args.data, args.limit)
+    for index, item in enumerate(items, start=1):
+        gold = extract_letter(item["answer"])
+        response = ask(cfg, [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
-        ], max_tokens=512, temperature=0.0)
-        elapsed_t = time.time() - start_t
-
-        if response is None:
-            print(f"  [{i+1}/{total}] SKIP (no response)")
-            continue
-
-        # Extract the letter answer
-        pred = response.strip().upper().replace(".", "")
-        # Find first A/B/C/D that appears
-        match = re.search(r'\b([ABCD])\b', pred)
-        got = match.group(1) if match else "?"
-        passed = got == gold
-        if passed:
-            correct += 1
-        details.append({"id": i, "gold": gold, "predicted": got, "passed": passed})
-        print(f"  [{i+1}/{total}] {'✓' if passed else '✗'} (gold={gold}, got={got}) ({elapsed_t:.1f}s)")
-        sys.stdout.flush()
-
-    accuracy = correct / total if total > 0 else 0.0
-    return {"n_correct": correct, "n_total": total, "accuracy": accuracy,
-            "accuracy_pct": round(accuracy * 100, 1)}
+            {"role": "user", "content": item["question"]},
+        ], args)
+        correct, predicted, channel = grade(response, gold)
+        tally.record(response, correct=correct)
+        rows.append({
+            "id": index - 1,
+            "gold": gold,
+            "predicted": predicted,
+            "passed": correct,
+            "channel": channel,
+            "cap_hit": response.ok and is_cap_hit(response),
+            "completion_tokens": response.completion_tokens,
+        })
+        mark = "?" if correct is None else ("PASS" if correct else "FAIL")
+        print(f"  [{index}/{len(items)}] {mark} (gold={gold}, got={predicted or '?'})"
+              f" ({response.elapsed_s:.1f}s)", flush=True)
+    if tally.cap_hits:
+        tally.notes.append(
+            f"{tally.cap_hits} answers stopped at the cap and their letters come "
+            "from truncated text")
+    return tally, rows
 
 
-def main():
-    parser = argparse.ArgumentParser(description="GPQA-Diamond benchmark")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
-    parser.add_argument("--api-key", default="not-needed")
-    parser.add_argument("--data", default="data/gpqa_diamond.json")
-    parser.add_argument("--output-dir", default="results")
-    parser.add_argument("--limit", type=int)
-    args = parser.parse_args()
+def totals(rows: list[dict]) -> dict:
+    """Leg-wide counts the orchestrator can compare across runs."""
+    return {
+        "empty_answers": sum(1 for row in rows if row["channel"] == "empty"),
+        "cap_hits": sum(1 for row in rows if row["cap_hit"]),
+    }
 
-    cfg = ModelConfig(name=args.model, endpoint=args.endpoint, api_key=args.api_key)
-    timer = start_timer()
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_leg_args("GPQA-Diamond: graduate-level science QA", DEFAULT_DATA, argv)
     print(f"GPQA-Diamond [{args.model}]", flush=True)
-    results = run_gpqa(cfg, args.data, args.limit)
-    results["_elapsed"] = int(time.time() - timer)
-    results["elapsed"] = elapsed(timer)
-    path = save_result("gpqa_diamond", args.model, results, args.output_dir)
-    report_stdout(results, f"GPQA-Diamond [{args.model}] done")
-    print(f"Saved to {path}")
+    tally, rows = run_leg(args)
+    finish(LEG_ID, args, tally, {"per_item": rows, **totals(rows)})
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

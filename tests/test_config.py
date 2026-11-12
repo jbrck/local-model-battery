@@ -98,7 +98,10 @@ class StandardTest(unittest.TestCase):
 
     def test_bundled_data_entries_declare_a_hash_and_an_item_count(self):
         bundled = self.standard["data"]["bundled"]
-        self.assertEqual(len(bundled), 5)
+        declared = {entry["file"] for entry in bundled}
+        legs = load_toml("legs.toml")["leg"]
+        wanted = {leg["data"] for leg in legs if leg.get("data")}
+        self.assertEqual(declared, wanted)
         for entry in bundled:
             self.assertEqual(len(entry["sha256_16"]), 16, entry["file"])
             self.assertGreater(entry["items"], 0, entry["file"])

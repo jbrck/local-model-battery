@@ -116,3 +116,26 @@ Category: Open Question
 Nothing on the reference box was touched. Its harness at `/mnt/models/bench/arete-harness`
 still runs the v1 standard. Migration is gated on answer 3 and on a dry run comparing output
 against existing reference rows.
+
+## Integration state (2026-11-12)
+
+- Every one of the 14 leg entries in `legs.toml` now points at a real in-repo script;
+  `check_catalogs.py` reports 14 in repo, 0 pending.
+- `standard.toml` pins nine bundled item files (four added this pass: ifbench 300, mmlu 500,
+  reasoning 8, refusal 70), and a test enforces that the bundled set equals the set of item
+  files the legs declare.
+- The harness default endpoint is env-overridable (`BATTERY_DEFAULT_ENDPOINT`). The test
+  package points it at a dead port, so a leg test that forgets `--endpoint` fails instantly
+  instead of quietly calling whatever is listening on the operator's machine. One leg test
+  had been passing that way against a live server.
+- Host env overrides take the plan from 8 runnable legs to 12: `LCB_DATA`, `LCB_SRC`,
+  `NLTK_DATA`, and the benchmark venv on `PATH`. `writing` stays skipped until a judge model
+  is configured, which is the intended behaviour.
+- Known gap: the `nltk_data` prereq check probes the interpreter running the planner, not the
+  IFBench verifier interpreter (`--ifbench-python`). With `NLTK_DATA` set and the benchmark
+  venv on `PATH`, ifbench still reports "the nltk module is not installed". Fix is to run the
+  nltk probe through the verifier interpreter and have the planner pass `--ifbench-python`.
+- Quality gate: the full gauntlet run fails on 63 methods (2 complexity, 49 coverage, 36
+  CRAP). Failures span legacy scripts (`report_scores.py`, `validate_suite.py`,
+  `score_writing.py`, `build_scoring_corpus.py`) and the new leg scripts, whose error
+  branches are thin. Not addressed in this pass; `--changed` is the per-commit mode.

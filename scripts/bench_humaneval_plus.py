@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""HumanEval+: code generation benchmark, self-contained test runner.
+"""HumanEval+: code generation on the shared leg contract.
 
-Reads problems from data/humaneval_plus.json, asks the model to complete each
-function, then runs the bundled test suite for that problem in a subprocess.
-No external evaluation harness required.
+Reads problems from the items file (default data/humaneval_plus.json), asks the
+model to complete each function, executes the candidate against the bundled
+test suite in a temp dir, and writes one result block for the orchestrator.
 """
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import sys
-import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.lib.code_exec import run_python_tests  # noqa: E402
-from scripts.lib.model import ModelConfig, chat_request  # noqa: E402
-from scripts.lib.reporting import elapsed, report_stdout, save_result, start_timer  # noqa: E402
+from scripts.lib.harness import (  # noqa: E402
+    LegArgs,
+    Tally,
+    ask,
+    finish,
+    leg_config,
+    load_items,
+    parse_leg_args,
+)
+from scripts.lib.model import ChatResponse  # noqa: E402
 
 SYSTEM = """You are an expert Python developer. Write a solution for the given problem.
 Output ONLY the code, no explanation, no markdown formatting, no imports.
@@ -26,84 +31,98 @@ The solution must be a standalone Python function."""
 CODE_FENCE = "```"
 
 
+def _trim_head(lines: list[str]) -> None:
+    while lines and not lines[0].strip():
+        lines.pop(0)
+
+
+def _trim_tail(lines: list[str]) -> None:
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+
+def _pop_fence(lines: list[str], index: int) -> None:
+    if lines and lines[index].strip().startswith(CODE_FENCE):
+        lines.pop(index)
+
+
 def strip_fences(text: str) -> str:
     """Remove a markdown code fence, preserving the code's own indentation."""
     lines = text.splitlines()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    if lines and lines[0].strip().startswith(CODE_FENCE):
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if lines and lines[-1].strip().startswith(CODE_FENCE):
-        lines.pop()
-    while lines and not lines[-1].strip():
-        lines.pop()
+    _trim_head(lines)
+    _pop_fence(lines, 0)
+    _trim_tail(lines)
+    _pop_fence(lines, -1)
+    _trim_tail(lines)
     return "\n".join(lines)
 
 
-def run_humaneval(cfg: ModelConfig, data_path: str, limit: int | None = None) -> dict:
-    """Run HumanEval+ over the data file. Returns pass@1 plus per-task detail."""
-    with open(data_path) as handle:
-        problems = json.load(handle)
-    if limit:
-        problems = problems[:limit]
-
-    total = len(problems)
-    passed = 0
-    results = []
-
-    for index, item in enumerate(problems, start=1):
-        started = time.time()
-        response = chat_request(cfg, [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": item["prompt"]},
-        ], max_tokens=1024, temperature=0.0)
-        elapsed_s = time.time() - started
-
-        if response is None:
-            print(f"  [{index}/{total}] SKIP (no response)")
-            results.append({"task_id": item["task_id"], "passed": False,
-                            "error": "no response", "time_s": round(elapsed_s, 1)})
-            continue
-
-        imports = item.get("imports") or ""
-        completion = strip_fences(response)
-        source = "\n".join(part for part in
-                           (imports, item["prompt"], completion) if part.strip())
-        ok, detail = run_python_tests(source, item["entry_point"], item["test"])
-        passed += int(ok)
-        results.append({"task_id": item["task_id"], "passed": ok,
-                        "error": None if ok else detail, "time_s": round(elapsed_s, 1)})
-        print(f"  [{index}/{total}] {'PASS' if ok else 'FAIL'} ({elapsed_s:.1f}s)"
-              + ("" if ok else f" {detail}"))
-        sys.stdout.flush()
-
-    pass_at_1 = passed / total if total else 0.0
-    return {"pass_at_1": pass_at_1, "pass_at_1_pct": round(pass_at_1 * 100, 1),
-            "n_passed": passed, "n_total": total, "results": results}
+def candidate_source(imports: str, prompt: str, completion: str) -> str:
+    """The module the grader executes: imports, then the signature, then the answer."""
+    return "\n".join(part for part in (imports, prompt, completion) if part.strip())
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="HumanEval+ benchmark")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
-    parser.add_argument("--api-key", default="not-needed")
-    parser.add_argument("--data", default="data/humaneval_plus.json")
-    parser.add_argument("--output-dir", default="results")
-    parser.add_argument("--limit", type=int)
-    args = parser.parse_args()
+def grade_completion(source: str, entry_point: str, test: str) -> tuple[bool | None, str]:
+    """Execute the candidate against its tests. None means the run never scored."""
+    ok, detail = run_python_tests(source, entry_point, test)
+    if "timeout" in detail.lower():
+        return None, detail
+    return ok, detail
 
-    cfg = ModelConfig(name=args.model, endpoint=args.endpoint, api_key=args.api_key)
-    timer = start_timer()
-    print(f"HumanEval+ [{args.model}]", flush=True)
-    results = run_humaneval(cfg, args.data, args.limit)
-    results["_elapsed"] = int(time.time() - timer)
-    path = save_result("humaneval_plus", args.model, results, args.output_dir)
-    report_stdout(results, f"HumanEval+ [{args.model}] done")
-    print(f"Saved to {path}")
-    return 0
+
+def messages_for(item: dict) -> list[dict]:
+    """The v1 prompt: the system instruction, then the problem statement."""
+    return [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": item["prompt"]},
+    ]
+
+
+def _grade_item(response: ChatResponse, item: dict) -> tuple[bool | None, str]:
+    """Grade one answer. None means the candidate run never scored."""
+    completion = strip_fences(response.answer() or "")
+    imports = item.get("imports") or ""
+    source = candidate_source(imports, item["prompt"], completion)
+    return grade_completion(source, item["entry_point"], item["test"])
+
+
+def _tally_item(tally: Tally, response: ChatResponse, item: dict, total: int) -> None:
+    """Record one case in the tally and print its line."""
+    if not response.ok:
+        tally.record(response)
+        print(f"  [{tally.items}/{total}] ! ({response.elapsed_s:.1f}s)"
+              f" {response.error or ''}", flush=True)
+        return
+    correct, detail = _grade_item(response, item)
+    if correct is None:
+        tally.record(response, correct=False)
+        tally.timeout_hits += 1
+        tally.notes.append(f"{item['task_id']}: execution {detail}")
+    else:
+        tally.record(response, correct=correct)
+    mark = "PASS" if correct else "FAIL"
+    print(f"  [{tally.items}/{total}] {mark} ({response.elapsed_s:.1f}s)"
+          + ("" if correct else f" {detail}"), flush=True)
+
+
+def run_humaneval(args: LegArgs) -> Tally:
+    """One ask per item; execute what comes back and tally it."""
+    cfg = leg_config(args)
+    items = load_items(args.data, args.limit)
+    tally = Tally()
+    for item in items:
+        response = ask(cfg, messages_for(item), args)
+        _tally_item(tally, response, item, len(items))
+    return tally
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_leg_args("HumanEval+ benchmark",
+                          default_data="data/humaneval_plus.json", argv=argv)
+    print(f"HumanEval+ [{args.model}] cap {args.cap} thinking {args.thinking}",
+          flush=True)
+    finish("humaneval_plus", args, run_humaneval(args))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

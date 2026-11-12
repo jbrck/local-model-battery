@@ -1,0 +1,42 @@
+[
+  {
+    "id": "math_train",
+    "prompt": "A train leaves Station A at 60 mph. Two hours later a second train leaves the same station on the same track at 90 mph. How many hours after the second train departs does it catch the first? End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*4\\b"
+  },
+  {
+    "id": "math_consecutive",
+    "prompt": "The sum of three consecutive odd integers is 231. What is the largest of the three? End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*79\\b"
+  },
+  {
+    "id": "math_perimeter",
+    "prompt": "A rectangle's length is twice its width. Its perimeter is 54. What is the area in square units? End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*162\\b"
+  },
+  {
+    "id": "math_machines",
+    "prompt": "If 4 machines make 4 widgets in 4 minutes, how many minutes does 8 machines take to make 8 widgets? End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*4\\b"
+  },
+  {
+    "id": "math_power",
+    "prompt": "Solve for x: 2^(x+1) = 32. End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*4\\b"
+  },
+  {
+    "id": "math_comb",
+    "prompt": "How many distinct ways can you arrange the letters of the word BOOK? End with 'ANSWER: <number>'.",
+    "expected_answer_pattern": "ANSWER:\\s*12\\b"
+  },
+  {
+    "id": "logic_knights",
+    "prompt": "On an island, knights always tell the truth and knaves always lie. Person A says 'We are both knaves.' What is A? End with 'ANSWER: knave'.",
+    "expected_answer_pattern": "ANSWER:\\s*knave"
+  },
+  {
+    "id": "code_sum",
+    "prompt": "Write a Python function `total(nums)` that returns the sum of a list of numbers. Output only the code.",
+    "expected_answer_pattern": "def\\s+total\\s*\\("
+  }
+]
