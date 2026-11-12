@@ -1,0 +1,279 @@
+# legs.toml — what the battery tests, and what each leg needs.
+#
+# One entry per benchmark leg. Item counts and budget floors live in standard.toml so
+# there is one frozen number per leg; the loader joins them.
+#
+#   harness        native  = scored by a script in this repo
+#                  adapter = scored by a third-party harness we wrap and version-pin
+#   implementation in_repo = the entry script is here
+#                  port_pending = the leg exists on the reference box, not yet here
+#   cap_var        dotted path into standard.toml, or `caps.default`
+#   ctx_need       minimum served window for this leg to mean what it says
+#   thinking       primary_on | primary_off | required_on | required_off | n/a
+#   resume         done_marker | partial_jsonl | none
+
+[[leg]]
+id = "selftest"
+name = "Data and harness selftest"
+measures = "that the LCB and MMLU data paths and the endpoint answer at all, before any real leg burns budget"
+scoring = "exit code; runs two items and refuses the battery on failure"
+harness = "native"
+implementation = "port_pending"
+entry = "scripts/bench_selftest.py"
+gate = true
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "required_on"
+thinking_effect = "a selftest that passes with thinking off can still fail on a reasoning leg"
+prereqs = ["lcb_data"]
+resume = "none"
+comparability_keys = ["cap", "ctx"]
+known_failures = ["a soft selftest hides a broken venv until 6 hours into the run"]
+
+[[leg]]
+id = "math500"
+name = "MATH-500"
+measures = "symbolic math reasoning, boxed final answers"
+scoring = "sympy equivalence against the reference answer"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/bench_math500.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "the 3080 box moved 83.2% -> 91.0% when thinking was enabled"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
+known_failures = [
+  "a cap-hit item scored by scraping a letter out of truncated reasoning",
+  "a thinking-off reasoner measures the cap, not the model",
+]
+
+[[leg]]
+id = "humaneval_plus"
+name = "HumanEval+"
+measures = "Python functional correctness against an extended hidden test suite"
+scoring = "pass@1, each candidate executed in a subprocess"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/bench_humaneval_plus.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "long reasoning traces push code out of the window on low caps"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
+known_failures = ["items that reason past the cap emit no code block and score zero"]
+
+[[leg]]
+id = "gpqa_diamond"
+name = "GPQA Diamond"
+measures = "graduate-level science reasoning, multiple choice"
+scoring = "letter match against the reference answer"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/bench_gpqa_diamond.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "50.0% -> 78.3% on the 3080 box; 28.3 points, the largest single-variable move we have measured"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
+known_failures = [
+  "at a 1024 cap 79 of 108 items sat on the ceiling, so the leg measured the cap",
+  "baseline noise: GPQA is the noisiest leg we run",
+]
+
+[[leg]]
+id = "instr_v2"
+name = "Instruction Following v2"
+measures = "adherence to soft and hard constraints in a short prompt set"
+scoring = "per-constraint rubric, mechanical"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/bench_instr_v2.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "hard constraints (partial credit triggers) survive thinking on every model so far"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "seed", "items_sha"]
+known_failures = ["thinking can reclassify a partial-credit trigger as a near miss"]
+
+[[leg]]
+id = "refusal"
+name = "Refusal battery"
+measures = "harmful-request refusal, edgy-prompt discrimination, and benign over-refusal"
+scoring = "three independent counts: refused/20 harmful, answered/20 edgy, refused/30 benign"
+harness = "native"
+implementation = "port_pending"
+entry = "scripts/refusal_bench.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "report refusal and over-refusal as separate counts; averaging them hides the trade"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "seed", "items_sha"]
+known_failures = [
+  "prompt order uses seed 7, not the standard seed 42",
+  "one number for the leg hides a model that refuses everything",
+]
+
+[[leg]]
+id = "reasoning"
+name = "Reasoning bench"
+measures = "whether the model emits a reasoning trace, and how many tokens it takes"
+scoring = "8 fixed tasks; trace presence and trace length"
+harness = "native"
+implementation = "port_pending"
+entry = "scripts/reasoning_bench.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "required_on"
+thinking_effect = "this leg exists to measure thinking, so it is meaningless with thinking off"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "seed"]
+known_failures = ["a reasoning-channel-only model scores as empty on the content channel"]
+
+[[leg]]
+id = "ifeval"
+name = "IFEval"
+measures = "verifiable instruction following at scale"
+scoring = "strict and loose prompt-level and instruction-level accuracy"
+harness = "adapter"
+implementation = "port_pending"
+entry = "scripts/adapters/ifeval_toolbench.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "at a 4096 cap mechanical-constraint tasks stalled and never finished on a reasoner"
+prereqs = ["tool_eval_bench"]
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "seed", "harness_version", "items_sha"]
+known_failures = [
+  "the harness writes its report to runs/YYYY/MM and ignores --json-file on this path",
+]
+
+[[leg]]
+id = "ifbench"
+name = "IFBench"
+measures = "out-of-domain instruction following on 300 prompts"
+scoring = "NLTK-based verifier, strict and loose"
+harness = "native"
+implementation = "port_pending"
+entry = "scripts/bench_ifbench.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "13 of 300 items hit the cap on the reference model"
+prereqs = ["nltk_data"]
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "seed", "items_sha"]
+known_failures = ["a missing NLTK corpus silently changes the verifier"]
+
+[[leg]]
+id = "toolbench"
+name = "Tool calling"
+measures = "tool selection, argument construction and multi-turn tool use"
+scoring = "scenario pass rate across 69 scenarios"
+harness = "adapter"
+implementation = "port_pending"
+entry = "scripts/adapters/ifeval_toolbench.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "thinking raises tool-call quality and lowers completion rate on small caps"
+prereqs = ["tool_eval_bench"]
+resume = "done_marker"
+comparability_keys = ["cap", "thinking", "harness_version", "items_sha"]
+known_failures = [
+  "tools plus response_format json_schema together returned HTTP 400 on llama.cpp b11670; 4 scenarios scored zero and the total was a floor, not a score",
+]
+
+[[leg]]
+id = "mmlu"
+name = "MMLU (generative)"
+measures = "broad knowledge, generative rather than logprob"
+scoring = "letter match on a seeded 500-item sample of the 14042-item test split"
+harness = "native"
+implementation = "port_pending"
+entry = "scripts/bench_mmlu.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "90.8% -> 91.0%; the leg barely moves with thinking, which makes it a good thinking-insensitive control"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
+known_failures = [
+  "at a 4096 cap 77 of 500 items exhausted the cap and emitted no letter; a 16384 rescue flipped 49",
+  "the sample must be reproducible; the item ids are pinned by hash, not by re-shuffle",
+]
+
+[[leg]]
+id = "hermesagent20"
+name = "HermesAgent-20"
+measures = "end-to-end agentic work against 20 real task scenarios"
+scoring = "artifact checks inside a Docker sandbox running a pinned agent runtime"
+harness = "adapter"
+implementation = "port_pending"
+entry = "scripts/adapters/hermesagent20.py"
+cap_var = "caps.default"
+ctx_need = 8192
+thinking = "primary_on"
+thinking_effect = "the run is budget-bound, so thinking costs wall time more than it costs score"
+prereqs = ["docker_sandbox", "benchlocal_cli"]
+resume = "partial_jsonl"
+comparability_keys = ["cap", "thinking", "case_timeout", "sandbox_image", "harness_version"]
+known_failures = [
+  "top-level thinking_enabled in the result JSON is a CLI echo and lies",
+  "the 600s per-case timeout is an invisible token cap: at 12 tok/s it lands near 7200 tokens",
+  "without --enable-sandboxed-packs the pack is a stub that scores nothing",
+]
+
+[[leg]]
+id = "lcb"
+name = "LiveCodeBench (release_v6 lite)"
+measures = "competitive programming against official test suites"
+scoring = "lcb_runner codegen metrics, generated code executed"
+harness = "adapter"
+implementation = "port_pending"
+entry = "scripts/adapters/lcb.py"
+cap_var = "caps.lcb"
+ctx_need = 114688
+thinking = "primary_on"
+thinking_effect = "removing the reasoning budget moved 66% -> 76% and added about 8 hours"
+prereqs = ["lcb_source", "lcb_data"]
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "items_sha", "slots"]
+known_failures = [
+  "16 of 100 problems never emitted a code block and consumed 7.4 of 14.1 hours",
+  "budget for the worst case, not the average",
+]
+
+[[leg]]
+id = "writing"
+name = "Writing Suite v1"
+measures = "instruction-following and craft on long-form prompts"
+scoring = "blind rubric judge, 1-10 per criterion; generation and scoring are separate phases"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/bench_writing_generate.py"
+cap_var = "caps.writing"
+ctx_need = 16384
+thinking = "n/a"
+thinking_effect = "generation runs at a higher temperature than the mechanical legs by design"
+prereqs = ["judge_endpoint"]
+resume = "none"
+comparability_keys = ["items_sha", "judge_model", "temperature", "cap"]
+known_failures = [
+  "the judge must not be the model under test",
+  "models that emit prose into a reasoning channel score as empty on the content channel",
+  "pairwise judging had a 75% first-slot bias and was removed in favor of the rubric suite",
+]

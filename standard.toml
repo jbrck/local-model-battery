@@ -1,0 +1,182 @@
+# standard.toml — the frozen battery standard.
+#
+# Every value here is a measurement variable: two runs are comparable only when both
+# used the same standard version. Change a value, bump `standard_version`, and record it
+# in CHANGELOG.md. Per-model differences belong in profiles/, never here.
+#
+# Floors and headroom are runaway guards, not measurements. Caps never shrink to fit a
+# slow model; budgets grow instead.
+
+standard_version = "v2"
+incomparable_with = ["v0-reference", "v1"]
+
+[caps]
+# Completion-token ceiling per leg. Nothing uncapped.
+default = 8192
+lcb = 114688          # window minus 16384 prompt headroom
+writing = 16384       # generation phase only
+
+[caps.by_leg]
+# Per-leg override of caps.default. Empty means "use default".
+
+[serve]
+ctx = 131072          # the largest leg cap sets this floor
+slots = 4             # -np 4, matches lcb_workers
+kv_unified = true     # explicit -np without unified KV gives each slot ctx/slots
+flash_attn = true
+kv_k = "q8_0"
+kv_v = "q8_0"
+
+[sampling]
+temperature = 0.0
+seed = 42
+
+[limits]
+math500 = 500
+humaneval_plus = 164
+gpqa_diamond = 198
+instr_v2 = 20
+refusal = 70
+reasoning = 8
+ifeval = 541
+ifbench = 300
+toolbench = 69
+mmlu = 500
+mmlu_even_per_subject = false
+lcb = 100
+lcb_workers = 4
+hermesagent20 = 20
+writing = 138
+
+[budget]
+headroom = 1.25       # budget = max(floor, headroom * items * cap / pilot_tps)
+stall_min = 10        # flat token counter with requests in flight, minutes
+
+[budget.floors]
+# Seconds. Sized for a ~27 tok/s reference model. Floors, never measurements.
+selftest = 300
+math500 = 14400
+humaneval_plus = 14400
+gpqa_diamond = 10800
+instr_v2 = 900
+refusal = 5400
+reasoning = 900
+ifeval = 28800
+ifbench = 7200
+toolbench = 10800
+mmlu = 28800
+hermesagent20 = 14400
+lcb = 28800
+writing = 0
+
+[budget.items]
+# Items per leg, for the budget formula.
+selftest = 2
+math500 = 500
+humaneval_plus = 164
+gpqa_diamond = 198
+instr_v2 = 20
+refusal = 70
+reasoning = 8
+ifeval = 541
+ifbench = 300
+toolbench = 69
+mmlu = 500
+hermesagent20 = 20
+lcb = 100
+writing = 138
+
+[timeouts]
+hermesagent20_case_floor = 600   # a hidden per-case token cap on slow models
+lcb_request_floor = 1800
+
+[data]
+# Bundled datasets. `sha256_16` is the first 16 hex digits of SHA-256: enough to prove
+# two hosts ran the same file.
+
+[[data.bundled]]
+file = "data/math500.json"
+sha256_16 = "4f00e95a2ad5d19b"
+items = 500
+source = "MATH (Hendrycks et al.)"
+license = "MIT"
+
+[[data.bundled]]
+file = "data/humaneval_plus.json"
+sha256_16 = "248245e908850f09"
+items = 164
+source = "HumanEval (Chen et al.) plus extended tests"
+license = "MIT / Apache-2.0"
+
+[[data.bundled]]
+file = "data/gpqa_diamond.json"
+sha256_16 = "fde3a0a53ee386f2"
+items = 198
+source = "GPQA (Rein et al.), diamond subset"
+license = "CC BY 4.0"
+
+[[data.bundled]]
+file = "data/instr_v2_tasks.json"
+sha256_16 = "e8b66af295174cfc"
+items = 20
+source = "Original"
+license = "MIT"
+
+[[data.bundled]]
+file = "data/writing_suite_v1.json"
+sha256_16 = "4817cebf09f5b3a3"
+items = 138
+source = "Original"
+license = "MIT"
+
+# Sources this repo does not redistribute. `path_env` overrides `path` when set.
+
+[[data.external]]
+id = "lcb_data"
+path = "data/lcb/test6.jsonl"
+path_env = "LCB_DATA"
+sha256_16 = "bb4c364f71921c44"
+items = 175
+source = "LiveCodeBench release_v6 lite"
+license = "MIT"
+fetch = "LiveCodeBench/LiveCodeBench release assets, release_v6 lite"
+
+[[data.external]]
+id = "lcb_source"
+path = "vendor/LiveCodeBench"
+path_env = "LCB_SRC"
+sha256_16 = ""
+items = 0
+source = "LiveCodeBench harness (lcb_runner)"
+license = "MIT"
+fetch = "git clone https://github.com/LiveCodeBench/LiveCodeBench"
+
+[[data.external]]
+id = "mmlu_source"
+path = ""
+path_env = ""
+sha256_16 = ""
+items = 14042
+source = "cais/mmlu test split"
+license = "MIT"
+fetch = "datasets.load_dataset('cais/mmlu', 'all', split='test')"
+
+[[data.external]]
+id = "ifbench_source"
+path = ""
+path_env = ""
+sha256_16 = ""
+items = 300
+source = "allenai/IFBench_test"
+license = "Apache-2.0"
+fetch = "huggingface-cli download allenai/IFBench_test"
+
+[[data.external]]
+id = "nltk_data"
+path = ""
+path_env = "NLTK_DATA"
+sha256_16 = ""
+items = 0
+source = "NLTK punkt/wordnet tokenizers"
+license = "Apache-2.0"
+fetch = "python -m nltk.downloader punkt punkt_tab wordnet"

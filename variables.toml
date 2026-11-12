@@ -1,0 +1,274 @@
+# variables.toml — every knob that can change a battery run, and what it costs to get wrong.
+#
+# The class decides what a tool may do with the variable without invalidating a result:
+#
+#   M  measurement  Changing it changes the number. Every row in one table must use the
+#                   same value. A deviation is recorded and stamped OFF-STANDARD, and the
+#                   row leaves the comparable table.
+#   C  capacity     Changing it changes speed, and sometimes runnability. It may differ per
+#                   host and per model. It must be logged in the manifest.
+#   D  dependency   A leg needs an external thing to exist. Missing means the leg is skipped
+#                   with a reason. Never a crash, never a silent zero.
+#
+# `effect` holds measured numbers only, with the source. `decision_rule` is what the planner
+# offers the operator and what the setup skill walks them through.
+
+[[variable]]
+id = "thinking"
+class = "M"
+applies_to = "all"
+stamp_key = "thinking"
+what_it_changes = "whether the model reasons before answering, and how the standard drives that"
+effect = "Thinking off cost MATH-500 7.8 points (83.2 -> 91.0) and GPQA-D 28.3 points (50.0 -> 78.3) on the 3080 box; MMLU moved 0.2 (90.8 -> 91.0). On the 003 reference the same switch moved MATH-500's first 101 items 79.2% -> 88.1% while an 85-item uncapped control group moved 0."
+source = "local-benchmarks rtx-3080-20gb-dual-mod/README.md; 003 battery plan section 1"
+decision_rule = "on for every reasoner unless the box cannot afford the wall time. A cap-bound reasoner measures the cap, not the model. When the chat template ignores the flag, stamp native-forced and run it in the on column rather than gating on a switch it does not honor."
+
+[[variable]]
+id = "cap"
+class = "M"
+applies_to = "all"
+stamp_key = "cap"
+what_it_changes = "completion tokens allowed per item, which caps how much reasoning a leg can emit"
+effect = "GPQA-D at a 1024 cap put 79 of 108 items on the ceiling. MMLU at 4096 left 77 of 500 (15%) with no answer letter, and a 16384 rescue re-run flipped 49 of them (78.4% -> 88.2%). LCB gained 10 points (66% -> 76%) when the reasoning budget was lifted, and the run grew by about 8 hours."
+source = "003 battery plan sections 1 and 3e; local-benchmarks rtx-3090/README.md"
+decision_rule = "one cap for the whole table. Never shrink the cap to fit a slow model: raise the budget instead. If the fit math says the cap is binding for a reasoner, offer the operator a larger cap before the run, not after."
+
+[[variable]]
+id = "case_timeout"
+class = "M"
+applies_to = ["hermesagent20"]
+stamp_key = "case_timeout"
+what_it_changes = "the per-case wall-clock timeout, which becomes a hidden completion cap on a slow model"
+effect = "A 600s per-case timeout at 12 tokens per second lands near 7200 tokens. The same case on a faster host gets a larger effective cap, so two hosts can score the same model differently for reasons that have nothing to do with the model."
+source = "003 battery plan section 3a"
+decision_rule = "scale the timeout with measured speed, max(600, 1.25 * cap / pilot_tps), and record it. Never leave it at a floor that a slow model cannot reach."
+
+[[variable]]
+id = "ctx"
+class = "M"
+applies_to = "all"
+stamp_key = "ctx"
+what_it_changes = "the served context window, which sets the largest usable cap and the per-slot share"
+effect = "LCB needs 114688 (a 114688 cap plus 16384 of prompt headroom). At a 64K window its own budget is unreachable and the row is not comparable to a 131072 row."
+source = "003 battery plan sections 1 and 3c; battery-standard.env"
+decision_rule = "hold 131072 when the box can. When VRAM forces less, record the actual value, name what it breaks, and stamp OFF-STANDARD: ctx. Print this decision even when the box has plenty of room, because it is the variable most likely to make two runs silently incomparable."
+
+[[variable]]
+id = "kv_type"
+class = "M"
+applies_to = "all"
+stamp_key = "kv_type"
+what_it_changes = "KV cache quantization, which changes both memory and numerics"
+effect = "q8_0 is the standard. A quantized cache can move scores against f16, so it is a measurement variable here, not an offload detail. It also decides whether a large window fits at all."
+source = "003 battery plan section 3c; battery-standard.env (KV_K, KV_V = q8_0)"
+decision_rule = "q8_0 for both K and V in every comparable row. Dropping to a smaller KV type to fit a window is a deviation, not a tuning knob."
+
+[[variable]]
+id = "flash_attn"
+class = "M"
+applies_to = "all"
+stamp_key = "flash_attn"
+what_it_changes = "attention kernel, which changes numerics and memory"
+effect = "on in the standard. Keep it uniform inside a table: an on/off split has never been measured to be free."
+source = "battery-standard.env (FLASH_ATTN=on)"
+decision_rule = "on. If a build lacks it, a deviation is recorded and the row is stamped."
+
+[[variable]]
+id = "slots"
+class = "M"
+applies_to = "all"
+stamp_key = "slots"
+what_it_changes = "parallel slots (-np), which set per-slot window and how many legs can run at once"
+effect = "An explicit -np without unified KV silently gives each slot ctx/slots, so a 131072 window becomes 32768 per slot at -np 4."
+source = "battery-standard.env comment on NP/KV_UNIFIED"
+decision_rule = "-np 4 with unified KV, matching lcb_workers 4. Any other slot count is recorded in the manifest."
+
+[[variable]]
+id = "temperature"
+class = "M"
+applies_to = "all"
+stamp_key = "temperature"
+what_it_changes = "sampling temperature"
+effect = "0.0 for every mechanical leg so a score is repeatable. The writing suite generates at a higher temperature by design and is scored separately."
+source = "battery-standard.env (TEMPERATURE=0.0)"
+decision_rule = "0.0. Never raise it to average out noise; report the noise instead."
+
+[[variable]]
+id = "seed"
+class = "M"
+applies_to = "all"
+stamp_key = "seed"
+what_it_changes = "item order and any sampling that survives a zero temperature"
+effect = "42 in the standard. The refusal battery orders its prompts with seed 7. Until now no seed lived in the frozen file at all, so comparability rested on per-script defaults."
+source = "battery-standard.env has no seed line; scripts/refusal_bench.py uses 7"
+decision_rule = "42 from the standard, and every leg echoes the seed it actually used into its result JSON. A leg that needs a different seed declares it instead of inheriting a default."
+
+[[variable]]
+id = "item_set"
+class = "M"
+applies_to = "all"
+stamp_key = "items_sha"
+what_it_changes = "which items a leg runs"
+effect = "MMLU runs a seeded 500-item sample of the 14042-item test split. LCB runs 100 of 175 test6 problems (sha256 prefix bb4c364f71921c44). IFBench runs all 300 and IFEval 541. A different sample is a different test."
+source = "standard.toml data section; 003 battery plan"
+decision_rule = "pin the item ids by hash, not by re-shuffling at runtime. Two hosts prove they ran the same items or the rows are not comparable."
+
+[[variable]]
+id = "judge_model"
+class = "M"
+applies_to = ["writing"]
+stamp_key = "judge_model"
+what_it_changes = "who scores the writing suite"
+effect = "A rubric score means nothing without the judge that produced it. The retired pairwise method showed a 75% first-slot bias, which is why scoring is now blind rubric over a 138-task suite."
+source = "local-model-battery CHANGELOG 2.0.0"
+decision_rule = "one judge per table, named in the manifest, and never the model under test."
+
+[[variable]]
+id = "harness_version"
+class = "M"
+applies_to = ["ifeval", "toolbench", "hermesagent20", "lcb"]
+stamp_key = "harness_version"
+what_it_changes = "the third-party harness that produces the score"
+effect = "tool-eval-bench, the LCB runner and the sandboxed agent runtime are all pinned by commit. A harness bump can move a score with the model unchanged."
+source = "003 battery plan section 3; PREFLIGHT records the versions actually used"
+decision_rule = "pin the commit. When a tool version moved, the manifest stamps it and the row is marked non-comparable until it is re-run."
+
+[[variable]]
+id = "engine_version"
+class = "C"
+applies_to = "all"
+stamp_key = "engine_version"
+what_it_changes = "the inference engine and its build"
+effect = "Known engine-level effects: a grammar plus json_schema combination failed with HTTP 400 on llama.cpp b11670 and cost 8 tool-calling points."
+source = "local-benchmarks rtx-3090/README.md"
+decision_rule = "log the engine and build in the manifest. Do not compare across engine versions without saying so."
+
+[[variable]]
+id = "weight_quant"
+class = "C"
+applies_to = "all"
+stamp_key = "weight_quant"
+what_it_changes = "weight precision and therefore size, speed and quality"
+effect = "A different quant is a different model. Speed scales almost linearly with bits; quality effects are real but smaller than a cap effect."
+source = "003 battery plan"
+decision_rule = "name the quant in the profile and the manifest. Two quants of one model are two rows, never one row."
+
+[[variable]]
+id = "offload_placement"
+class = "C"
+applies_to = "all"
+stamp_key = "offload_placement"
+what_it_changes = "which layers live in VRAM and which on CPU, plus thread count and NUMA placement"
+effect = "It decides whether a model runs at all: a 75.8 GB MoE only fits a 2x20 GB box because most experts live in RAM. It moves tokens per second, not the zero-temperature score."
+source = "local-benchmarks rtx-3080-20gb-dual-mod/README.md"
+decision_rule = "record the placement in the manifest. A placement change that alters a score means something else changed too."
+
+[[variable]]
+id = "spec_decode"
+class = "C"
+applies_to = "all"
+stamp_key = "spec_decode"
+what_it_changes = "speculative decoding, which changes speed and can change sampled output"
+effect = "MTP versus DFlash2 is a serve-configuration experiment. It is measured with the spec-decode experiment, not by mixing it into a model table."
+source = "local-benchmarks rtx-3090/test/test_spec-decode-mtp-vs-dflash.md"
+decision_rule = "off for comparable rows unless the whole table used it. Two runs must not differ only in spec decode."
+
+[[variable]]
+id = "host_vram"
+class = "C"
+applies_to = "all"
+stamp_key = "host_vram"
+what_it_changes = "how much VRAM is actually free for the model"
+effect = "ComfyUI resident holds about 11 GB of a 24 GB card before the model loads, which changes what can be served without changing the model."
+source = "local-benchmarks rtx-3090/README.md"
+decision_rule = "probe VRAM in use and list foreign compute apps before the run. Never start a leg with another process holding VRAM."
+
+[[variable]]
+id = "host_ram"
+class = "C"
+applies_to = "all"
+stamp_key = "host_ram"
+what_it_changes = "whether an offloaded model fits, and how much page cache is available"
+effect = "The 3080 box runs a 75.8 GB MoE because most experts live in system RAM. Free RAM, not total, is the number that matters."
+source = "local-benchmarks rtx-3080-20gb-dual-mod/README.md"
+decision_rule = "require resident weights plus 20 GB of free RAM at preflight."
+
+[[variable]]
+id = "power_limit"
+class = "C"
+applies_to = "all"
+stamp_key = "power_limit"
+what_it_changes = "GPU power cap and therefore sustained clock"
+effect = "300 W versus 350 W measured 15 to 20 percent lower tokens per second. Every published 3090 number we have sits under the cap."
+source = "local-benchmarks rtx-3090/README.md"
+decision_rule = "record the limit and the measured speed. A power cap is why a published speed sometimes cannot be reproduced, so name it before blaming the model."
+
+[[variable]]
+id = "external_tool_version"
+class = "C"
+applies_to = ["ifeval", "toolbench", "hermesagent20", "lcb"]
+stamp_key = "external_tool_version"
+what_it_changes = "the version of a wrapped harness"
+effect = "Recorded at preflight. The tool-eval-bench grammar path failed on one engine build and cost 8 points, which looked like a model weakness for a week."
+source = "local-benchmarks rtx-3090/README.md"
+decision_rule = "pin and record. A leg whose tool version moved is stamped rather than compared."
+
+[[variable]]
+id = "serve_script"
+class = "C"
+applies_to = "all"
+stamp_key = "serve_script"
+what_it_changes = "the exact command line that launched the server"
+effect = "Captures flags that are not visible from the API, such as -kvu, thread counts and offload splits."
+source = "003 battery plan section 3"
+decision_rule = "capture the full command line in the manifest and diff it before comparing rows."
+
+[[variable]]
+id = "docker_sandbox"
+class = "D"
+applies_to = ["hermesagent20"]
+stamp_key = "sandbox_image"
+what_it_changes = "whether the sandboxed agent leg can run"
+effect = "The leg runs artifacts inside a pinned sandbox image. Without --enable-sandboxed-packs the pack is a stub that scores nothing, which reads as a real 0."
+source = "003 battery plan section 3a; local-benchmarks rtx-3090/test/test_hermesagent-20.md"
+decision_rule = "present, digest recorded, or the leg is skipped with the reason. A stub pack must never be allowed to publish a score."
+
+[[variable]]
+id = "nltk_data"
+class = "D"
+applies_to = ["ifbench"]
+stamp_key = "nltk_data"
+what_it_changes = "whether the IFBench verifier can tokenize"
+effect = "The verifier needs punkt and wordnet. A missing corpus changes the verifier silently."
+source = "003 battery plan section 3b"
+decision_rule = "check for the corpus at preflight; skip the leg with the reason when absent."
+
+[[variable]]
+id = "lcb_source"
+class = "D"
+applies_to = ["lcb"]
+stamp_key = "lcb_source"
+what_it_changes = "whether generated code can be scored at all"
+effect = "The LCB leg scores through the official runner, so its source checkout is a hard dependency. The dataset is pinned by hash (test6.jsonl, prefix bb4c364f71921c44)."
+source = "003 battery plan section 3d; battery-standard.env (LCB_DATA_SHA16)"
+decision_rule = "checkout present and dataset hash matched, or the leg is skipped. Never score code with a local approximation and label it LCB."
+
+[[variable]]
+id = "tool_eval_bench"
+class = "D"
+applies_to = ["ifeval", "toolbench"]
+stamp_key = "tool_eval_bench"
+what_it_changes = "whether the two wrapped instruction and tool legs can run"
+effect = "Both legs are third-party scored. The IFEval report path ignores --json-file and lands in runs/YYYY/MM, so the adapter copies it out."
+source = "003 battery plan section 3e"
+decision_rule = "present, version recorded, or both legs are skipped with the reason."
+
+[[variable]]
+id = "judge_endpoint"
+class = "D"
+applies_to = ["writing"]
+stamp_key = "judge_endpoint"
+what_it_changes = "whether the writing suite can be scored after generation"
+effect = "Generation is phase one; scoring is a separate blind pass. Without a judge endpoint the suite can still generate, but it cannot produce a score."
+source = "local-model-battery README, scoring section"
+decision_rule = "require a judge endpoint that is not the model under test. Generate-only is allowed and reported as unscored."
