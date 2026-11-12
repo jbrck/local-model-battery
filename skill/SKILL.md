@@ -28,7 +28,8 @@ sheet, and taking that decision stamps the run off-standard instead of quietly c
 | KV type, flash attention | the standard (q8_0, on) | q8_0 KV costs 131072 bytes per token per sequence; the kernel can move numerics |
 | quant | the profile | two quants of one model are two entries, never one row |
 | items file | the leg's `data` path, hashed into the manifest | 4096-capped MMLU and 16384-capped MMLU are the same items and different scores |
-| judge model | `--judge-model`, or the profile | without a judge the writing leg generates and cannot be scored |
+| a leg's interpreter | the leg's `interpreter` in `legs.toml` | a leg whose helpers come from an outside checkout cannot import under the orchestrator's own interpreter. The declared path must be absolute. Wrong path means the leg reports `not run` before its first item |
+| judge model | `standard.toml [judge] model`, unless `--judge-model` overrides it | the judge is a comparability key: two runs only compare when the same model scored both. The judge endpoint stays the operator's, and an empty one means the endpoint the run itself uses |
 
 ## Step 1: serve the model
 
@@ -81,6 +82,9 @@ option costs, and the measured effect of getting it wrong — the numbers behind
   costs points; thinking on where it is not needed costs wall clock and can still move the score.
 - `prereq:<leg>` — an external harness or datum is absent, so the leg is skipped rather than
   scored zero. Skipped is visible in the manifest; zero is a lie.
+- `interpreter:<leg>` — this leg runs under a different interpreter than the orchestrator, because
+  its helpers import from an outside checkout. The row names the path and the cost of a wrong one:
+  the leg reports `not run` at minute zero instead of scoring anything.
 
 **Set by the standard here** is every remaining knob, with the conservative reading spelled out.
 These are what make the number comparable. Change one and the stamp stops saying ON-STANDARD,
@@ -190,6 +194,14 @@ The frozen standard holds no machine paths. Four legs need data the repo does no
 
 The benchmark interpreter carries `nltk`, `ifbench` and the lcb scorer's dependencies: `/mnt/data/benchmark-venv/bin/python3`.
 
+The LCB leg does not reach that interpreter through `PATH`. Its entry declares
+`interpreter = "/mnt/data/benchmark-venv/bin/python3"` in `legs.toml`, and `run_battery.py` launches
+the leg with that path, because the leg's prompt helpers import `lcb_runner` from the checkout and
+the repo's own venv carries no `datasets`. On a host that keeps those dependencies elsewhere, edit
+the leg entry rather than exporting `PATH` — a relative path is rejected when the catalog validates.
+The PATH row above is only for the legs that shell out to a CLI (`tool-eval-bench`,
+`benchlocal-cli`).
+
     export LCB_DATA=/mnt/data/lcb-data/test6.jsonl
     export LCB_SRC=/mnt/data/lcb-src/LiveCodeBench
     export NLTK_DATA=/mnt/data/benchmark-venv/nltk_data
@@ -199,7 +211,7 @@ Ask the planner what a host will actually run before starting a 14-leg day. Ever
 
     python3 scripts/plan_run.py --profile profiles/<name>.toml --no-probe --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['legs']),'run,',len(d['skips']),'skipped'); [print('  skip', s['leg'], '-', s['reason']) for s in d['skips']]"
 
-On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing stays out until a judge model is configured, which is the one gap no env var closes.
+On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing is the fourteenth, and no env var reaches it: the standard pins the judge model (`nous-glm-5-3-flash`), so nothing needs exporting, but the leg only scores when that endpoint answers. Without a reachable judge it generates every answer and reports itself `not scored` with the reason, exit 0. Generation and scoring are separate steps, so a judge that was down costs a re-score, never a regeneration. `--judge-model` still wins when you want a different judge; the plan sheet then labels the source `(profile)` instead of `(standard)`.
 
 ## A leg that says in_repo is not a ported leg
 
@@ -219,7 +231,9 @@ Once every leg is on the contract, `scripts/lib/reporting.py` and `scripts/lib/m
 
 ## Gate scoping while legs are mid-port
 
-The full gauntlet carries pre-existing complexity failures from the v1 scripts (the worst sits around CC 34). Gate on `--changed`, or grep the report for the files you touched, and leave the legacy failures alone. A port that splits a long if-chain into small functions clears its own file without touching anyone else's.
+Scope the report to the files you touched rather than reading it repo-wide, and group it into `file:line [method] reason` pairs first: the raw output lists each method once per gate, so an ungrouped read looks three times worse than it is.
+
+The v1 scoring toolchain is deleted (`report_scores.py`, `validate_suite.py`, `score_writing.py`, `build_scoring_corpus.py`, `lib/reporting.py`) along with the test that only covered it. That is the pattern for whatever debt remains here: delete what nothing calls before writing a test to defend it, then split the too-complex methods and cover the error branches. Full order, report parser and the parallel worker brief: `quality-gauntlet` → `references/clearing-gate-debt.md`.
 
 ## Pitfalls
 
@@ -238,6 +252,10 @@ The full gauntlet carries pre-existing complexity failures from the v1 scripts (
   `prose_elo_finalize.py`. Never start references at 1500: that erases the established ranking.
 - **ELO from merged data.** Head-to-head wins against a weak opponent inflate a number. Check raw
   draws first, and say "N draws out of N tasks", never "N/N".
+- **`not run` is not `fail`.** A leg stopped by its own setup — missing data, an interpreter without
+  the dependencies — reports `not run` with the reason in the block. Nothing ran, so the model must
+  not wear it. The manifest prints `reason` for those legs, so put the cause there, not only in the
+  leg's log.
 - **Never kill a running leg because of a remark.** "That looks slow" is not a stop command. If JB
   wants it stopped he will say so; ask when unsure.
 - **sympy on a new Python.** Python 3.14 has no sympy wheels: use a 3.10-3.12 venv, or
@@ -250,7 +268,12 @@ The full gauntlet carries pre-existing complexity failures from the v1 scripts (
 ```bash
 python3 -m unittest discover -s tests -t .
 python3 scripts/check_catalogs.py
+PATH=/home/jwpb/hermes-state/skills/venvs/quality-gauntlet/bin:$PATH \
+  python3 /home/jwpb/hermes-state/skills/skills/quality-gauntlet/scripts/gauntlet.py \
+  --src-dir scripts --test-dir tests
 ```
+
+Exit 0 on the third is the bar for a commit in this repo: coverage ≥ 80%, CRAP ≤ 8 and complexity ≤ 15 per method, with no baseline or exclusion list.
 
 Run `check_catalogs.py` after any edit to `standard.toml`, `legs.toml` or `variables.toml`: it
 refuses a catalog that names a variable no leg consumes, or a leg whose cap cannot be resolved.
