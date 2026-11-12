@@ -48,6 +48,22 @@ class BudgetMathTest(unittest.TestCase):
         self.assertFalse(result(tps=25.0, stalled=True).usable)
         self.assertFalse(result(tps=0.0).usable)
 
+    def test_to_dict_serializes_what_the_run_report_records(self):
+        # The dict goes straight into the run's JSON report, so every field survives and
+        # floats are rounded to something readable.
+        pilot = PilotResult(tps=12.3456, latency_s=1.23456, generated_tokens=500,
+                            requests=3, failed=1, stalled=False,
+                            errors=("HTTP 500 boom", "no usable answer"))
+        record = pilot.to_dict()
+        self.assertEqual(record["tps"], 12.35)
+        self.assertEqual(record["latency_s"], 1.23)
+        self.assertEqual(record["generated_tokens"], 500)
+        self.assertEqual(record["requests"], 3)
+        self.assertEqual(record["failed"], 1)
+        self.assertFalse(record["stalled"])
+        self.assertEqual(record["errors"], ["HTTP 500 boom", "no usable answer"])
+        self.assertTrue(record["usable"])
+
 
 class LivePilotTest(unittest.TestCase):
     def test_pilot_measures_tokens_per_second(self):

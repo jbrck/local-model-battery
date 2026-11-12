@@ -4,6 +4,8 @@ Everything runs against the JsonStub fake endpoint; no network and no model.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -16,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scripts.bench_mmlu import (  # noqa: E402
     build_prompt,
     items_hash,
+    main,
     parse_letter,
     run_mmlu,
 )
@@ -121,6 +124,54 @@ class CapHitScoringTest(unittest.TestCase):
         self.assertEqual(tally.correct, 1)     # only the clean answer scored
         self.assertEqual(tally.cap_hits, 1)     # the truncated item hit the cap
         self.assertEqual(tally.status(), "pass")
+
+
+class MainTest(unittest.TestCase):
+    """The entry point: flags in, a scored result block and the item hash out."""
+
+    ITEMS = [
+        {"id": 0, "subject": "astronomy", "question": "Which planet is closest to the sun?",
+         "choices": ["Venus", "Mercury", "Earth", "Mars"], "answer": "B"},
+        {"id": 1, "subject": "astronomy", "question": "Which planet has the most moons?",
+         "choices": ["Mars", "Venus", "Jupiter", "Saturn"], "answer": "C"},
+    ]
+
+    def test_main_scores_a_small_sample_and_writes_its_block(self):
+        def route(body: dict) -> tuple:
+            gold = "B" if "closest to the sun" in body["messages"][0]["content"] else "C"
+            return 200, completion(f"Answer: {gold}")
+
+        with JsonStub(route) as stub, \
+                tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "items.json")
+            with open(data, "w") as handle:
+                json.dump({"items": self.ITEMS}, handle)
+            argv = ["--model", "stub", "--endpoint", stub.endpoint,
+                    "--data", data, "--output-dir", tmp, "--limit", "2"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertIsNone(main(argv))
+            with open(os.path.join(tmp, "mmlu.result.json")) as handle:
+                block = json.load(handle)
+        self.assertEqual(block["leg"], "mmlu")
+        self.assertEqual(block["items"], 2)
+        self.assertEqual(block["correct"], 2)
+        self.assertEqual(block["scored"], 2)
+        self.assertEqual(block["items_sha"], items_hash(self.ITEMS))
+
+    def test_an_empty_data_file_runs_nothing_and_writes_no_block(self):
+        with JsonStub(lambda _body: (200, completion("Answer: A"))) as stub, \
+                tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "items.json")
+            with open(data, "w") as handle:
+                json.dump({"items": []}, handle)
+            argv = ["--model", "stub", "--endpoint", stub.endpoint,
+                    "--data", data, "--output-dir", tmp]
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                main(argv)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "mmlu.result.json")))
+            self.assertIn("no items", err.getvalue())
 
 
 class ItemsHashTest(unittest.TestCase):

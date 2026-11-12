@@ -2,21 +2,28 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
+import runpy
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from scripts.lib.env_probe import Gpu, HostFacts  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_run import (  # noqa: E402
+    Decision,
     KIND_CAPACITY,
     KIND_DEPENDENCY,
     KIND_MEASUREMENT,
+    Option,
     THINKING_CHOICES,
     budget_seconds,
     model_footprint,
@@ -251,6 +258,47 @@ class ThinkingTest(unittest.TestCase):
         self.assertEqual(runnable(result, "math500").thinking, "off")
 
 
+class DecisionRowTest(unittest.TestCase):
+    """The row type the sheet is built from: when it reads as a deviation, and how it serialises."""
+
+    def test_only_a_measurement_variable_can_be_off_standard(self):
+        moved = Decision("ctx", KIND_MEASUREMENT, "65536", "131072", "the window shrank")
+        held = replace(moved, chosen="131072")
+        capacity = Decision("host_vram", KIND_CAPACITY, "24 GB", "131072",
+                            "capacity is whatever the host is")
+        self.assertTrue(moved.is_deviation)
+        self.assertFalse(held.is_deviation)
+        self.assertFalse(capacity.is_deviation)
+
+    def test_a_standard_value_that_is_not_stated_is_never_a_deviation(self):
+        row = Decision("judge_model", KIND_MEASUREMENT, "deckard-40b", "n/a", "scored by")
+        self.assertFalse(row.is_deviation)
+        self.assertFalse(replace(row, standard_value="").is_deviation)
+
+    def test_to_dict_carries_the_deviation_flag_and_the_option_list(self):
+        row = Decision("thinking", KIND_MEASUREMENT, "off", "on", "cheaper and worse",
+                       options=(Option("keep thinking on", "stays on-standard", recommended=True),
+                                Option("turn it off", "off-standard")),
+                       needs_operator=True)
+        payload = row.to_dict()
+        self.assertEqual(payload["variable"], "thinking")
+        self.assertEqual(payload["kind"], KIND_MEASUREMENT)
+        self.assertEqual(payload["standard"], "on")
+        self.assertTrue(payload["deviation"])
+        self.assertTrue(payload["needs_operator"])
+        self.assertEqual([item["label"] for item in payload["options"]],
+                         ["keep thinking on", "turn it off"])
+        self.assertTrue(payload["options"][0]["recommended"])
+        self.assertFalse(payload["options"][1]["recommended"])
+
+    def test_the_render_marks_the_recommended_option_and_the_measured_cost(self):
+        busy = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 11264, 350.0),), ram_total_gb=64.0,
+                         ram_available_gb=60.0, tools=TOOLS)
+        sheet = plan(FITS, host=busy).render()
+        self.assertIn("* keep thinking on", sheet)
+        self.assertIn("Measured:", sheet)
+
+
 class DecisionTest(unittest.TestCase):
     def test_the_standard_knobs_are_stamped_with_their_standard_values(self):
         result = plan(SMALL)
@@ -358,6 +406,34 @@ class OutputTest(unittest.TestCase):
         text = plan(SMALL, selected=("math500",)).render()
         self.assertIn("math500", text)
         self.assertIn("cap 8192", text)
+
+
+class ScriptEntryTest(unittest.TestCase):
+    """The file the setup skill actually runs: python3 scripts/plan_run.py must print the sheet."""
+
+    PROFILE = ('id = "sheet-test"\nweights_gb = 5.2\n\n[model]\n'
+               'n_layers = 32\nn_kv_heads = 8\nhead_dim = 128\n')
+
+    QUIET_HOST = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 0, 350.0),),
+                           ram_total_gb=64.0, ram_available_gb=60.0)
+
+    def test_the_script_form_prints_the_decision_sheet_and_exits_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "sheet-test.toml")
+            path.write_text(self.PROFILE)
+            argv = ["scripts/plan_run.py", "--profile", str(path), "--no-probe",
+                    "--legs", "math500,mmlu"]
+            buffer = io.StringIO()
+            with mock.patch("sys.argv", argv), \
+                    mock.patch("scripts.lib.env_probe.probe_host",
+                               return_value=self.QUIET_HOST):
+                with redirect_stdout(buffer), self.assertRaises(SystemExit) as caught:
+                    runpy.run_path("scripts/plan_run.py", run_name="__main__")
+        self.assertEqual(caught.exception.code, 0)
+        sheet = buffer.getvalue()
+        self.assertIn("Battery v2 plan -- sheet-test", sheet)
+        self.assertIn("math500", sheet)
+        self.assertIn("cap 8192", sheet)
 
 
 if __name__ == "__main__":

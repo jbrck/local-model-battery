@@ -66,6 +66,26 @@ def _tool_dependency(host: HostFacts, name: str) -> Dependency:
     return Dependency(name, False, f"{name} is not on PATH")
 
 
+def _entry_shape_problem(entry_id: str, resolved: Path, want_file: bool) -> Dependency | None:
+    """A path of the wrong kind: a directory where the data file belongs, or the reverse."""
+    if want_file and not resolved.is_file():
+        return Dependency(entry_id, False, f"{resolved} is not a file")
+    if not want_file and not resolved.is_dir():
+        return Dependency(entry_id, False, f"{resolved} is not a directory")
+    return None
+
+
+def _entry_hash_problem(entry_id: str, resolved: Path, entry: dict) -> Dependency | None:
+    """A file whose first 16 hash digits do not match the pin in the standard."""
+    pinned = str(entry.get("sha256_16") or "")
+    if pinned and resolved.is_file():
+        actual = sha256_prefix(resolved)
+        if actual != pinned:
+            return Dependency(entry_id, False,
+                              f"hash mismatch at {resolved}: {actual} != {pinned}")
+    return None
+
+
 def _path_dependency(standard: dict, entry_id: str, want_file: bool) -> Dependency:
     """Check an external data path, and its hash when the manifest pins one."""
     entry = _external_entry(standard, entry_id)
@@ -76,16 +96,11 @@ def _path_dependency(standard: dict, entry_id: str, want_file: bool) -> Dependen
     if resolved is None:
         hint = entry.get("fetch") or "see standard.toml"
         return Dependency(entry_id, False, f"not found at {entry.get('path')!r}; fetch: {hint}")
-    if want_file and not resolved.is_file():
-        return Dependency(entry_id, False, f"{resolved} is not a file")
-    if not want_file and not resolved.is_dir():
-        return Dependency(entry_id, False, f"{resolved} is not a directory")
-    pinned = str(entry.get("sha256_16") or "")
-    if pinned and resolved.is_file():
-        actual = sha256_prefix(resolved)
-        if actual != pinned:
-            return Dependency(entry_id, False,
-                              f"hash mismatch at {resolved}: {actual} != {pinned}")
+    problem = _entry_shape_problem(entry_id, resolved, want_file)
+    if problem is None:
+        problem = _entry_hash_problem(entry_id, resolved, entry)
+    if problem is not None:
+        return problem
     return Dependency(entry_id, True, str(resolved))
 
 

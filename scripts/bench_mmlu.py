@@ -89,11 +89,11 @@ def run_mmlu(cfg: ModelConfig, items: list[dict], args) -> harness.Tally:
     return tally
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Run the leg: parse flags, score the items, write the result block."""
     args = harness.parse_leg_args(
         "MMLU (generative): broad knowledge on a pinned 500-item sample.",
-        default_data=DEFAULT_DATA)
+        default_data=DEFAULT_DATA, argv=argv)
     cfg = harness.leg_config(args)
     items = harness.load_items(args.data, limit=args.limit)
     if not items:

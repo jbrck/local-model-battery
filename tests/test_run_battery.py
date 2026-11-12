@@ -204,6 +204,21 @@ class RunLegTest(FakeRun):
         self.assertEqual(block["status"], "timeout")
         self.assertIn("planned budget", block["reason"])
 
+    def test_a_leg_that_wrote_then_overran_keeps_its_numbers_marked_timeout(self):
+        wrote_then_hung = ("import json, os, sys, time\n"
+                           "out = os.path.join(sys.argv[sys.argv.index('--output-dir') + 1],"
+                           " 'math500.result.json')\n"
+                           "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
+                           "json.dump({'leg': 'math500', 'status': 'pass', 'correct': 10},"
+                           " open(out, 'w'))\n"
+                           "time.sleep(30)\n")
+        write_script(self.root, "scripts/bench_math500.py", wrote_then_hung)
+        planned = self.planned(budget_s=1)
+        block = run_battery.run_leg(planned, self.args(), self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "timeout")
+        self.assertEqual(block["correct"], 10)
+        self.assertIn("the numbers here are the ones it had written", block["reason"])
+
     def test_the_budget_kill_can_be_turned_off(self):
         write_script(self.root, "scripts/bench_math500.py", PASS)
         planned = self.planned(budget_s=0)

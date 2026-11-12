@@ -6,11 +6,22 @@ import io
 import json
 import os
 import random
+import sys
+import tempfile
 import unittest
 
-from scripts.lib.harness import parse_leg_args
-from scripts.refusal_bench import PROMPT_SEED, classify, evaluate, ordered_items
-from tests.stub_json import JsonStub, completion
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.lib.harness import parse_leg_args  # noqa: E402
+from scripts.refusal_bench import (  # noqa: E402
+    PROMPT_SEED,
+    classify,
+    evaluate,
+    main,
+    ordered_items,
+    reply_text,
+)
+from tests.stub_json import JsonStub, completion  # noqa: E402
 
 DATA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                     "data", "refusal_prompts.json"))
@@ -56,6 +67,28 @@ class ClassifierTest(unittest.TestCase):
         self.assertEqual(classify("   "), "UNCLEAR")
 
 
+class ReplyTextTest(unittest.TestCase):
+    """A verdict is based on the content and, when present, the reasoning joined to it."""
+
+    def test_reasoning_is_joined_onto_the_content(self):
+        self.assertEqual(reply_text("Sure thing.", "let me think"), "Sure thing. let me think")
+
+    def test_reasoning_alone_is_the_verdict_text_when_the_content_is_empty(self):
+        self.assertEqual(reply_text("", "I'm sorry, I can't help."), "I'm sorry, I can't help.")
+
+    def test_without_reasoning_the_content_stands_alone(self):
+        self.assertEqual(reply_text("Sure thing.", ""), "Sure thing.")
+
+    def test_a_refusal_hiding_in_the_reasoning_channel_still_counts(self):
+        route = ("/v1/chat/completions",
+                 (200, completion("Sure thing!", reasoning="I'm sorry, I can't do that.",
+                                  tokens=30)))
+        with JsonStub(dict([route])) as stub:
+            extra = run_leg(stub)
+        self.assertEqual(extra["harmful_refused"], 20)
+        self.assertEqual(extra["harmful_answered"], 0)
+
+
 class CountsTest(unittest.TestCase):
     def test_three_counts_land_in_three_separate_fields(self):
         with JsonStub(routed_reply) as stub:
@@ -97,6 +130,21 @@ class OrderTest(unittest.TestCase):
         expected = [i["prompt"] for i in ordered_items(load_items())]
         self.assertEqual(sent, expected)
         self.assertEqual(len(sent), 70)
+
+
+class MainTest(unittest.TestCase):
+    def test_main_runs_a_small_sample_and_writes_the_refusal_block(self):
+        with JsonStub(routed_reply) as stub, tempfile.TemporaryDirectory() as tmp:
+            argv = ["--model", "stub", "--endpoint", stub.endpoint,
+                    "--data", DATA, "--output-dir", tmp, "--limit", "2"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(argv)
+            with open(os.path.join(tmp, "refusal.result.json")) as handle:
+                block = json.load(handle)
+        self.assertEqual(block["leg"], "refusal")
+        self.assertEqual(block["items"], 2)
+        self.assertTrue(block["notes"])
+        self.assertIn("seeded with 7", " ".join(block["notes"]))
 
 
 if __name__ == "__main__":

@@ -89,6 +89,22 @@ class CatalogTest(unittest.TestCase):
     def test_shipped_catalog_validates_clean(self):
         self.assertEqual(validate_legs(self.legs, self.raw), [])
 
+    def test_to_dict_lists_every_field_the_manifest_records(self):
+        leg = make_leg(prereqs=("lcb_data",), comparability_keys=("cap", "ctx"),
+                       known_failures=("flaky exit",), data="data/lcb.jsonl")
+        payload = leg.to_dict()
+        self.assertEqual(payload["id"], "sample")
+        self.assertEqual(payload["measures"], "nothing")
+        self.assertEqual(payload["scoring"], "exit code")
+        self.assertEqual(payload["implementation"], "in_repo")
+        self.assertEqual(payload["prereqs"], ["lcb_data"])
+        self.assertEqual(payload["comparability_keys"], ["cap", "ctx"])
+        self.assertEqual(payload["known_failures"], ["flaky exit"])
+        self.assertEqual(payload["gate"], False)
+        self.assertEqual(payload["items"], 10)
+        self.assertEqual(payload["budget_floor"], 60)
+        self.assertEqual(payload["data"], "data/lcb.jsonl")
+
 
 class ValidationTest(unittest.TestCase):
     def setUp(self):
@@ -117,6 +133,18 @@ class ValidationTest(unittest.TestCase):
     def test_missing_raw_field_is_reported(self):
         problems = validate_legs([], [{"id": "half"}])
         self.assertTrue(any("missing field" in problem for problem in problems))
+
+    def test_a_nonpositive_context_window_is_reported(self):
+        problems = validate_legs([make_leg(ctx_need=0)])
+        self.assertTrue(any("ctx_need must be positive" in problem for problem in problems))
+
+    def test_a_leg_without_an_entry_script_is_reported(self):
+        problems = validate_legs([make_leg(entry="")])
+        self.assertTrue(any("entry script" in problem for problem in problems))
+
+    def test_a_leg_without_comparability_keys_is_reported(self):
+        problems = validate_legs([make_leg(comparability_keys=())])
+        self.assertTrue(any("comparability key" in problem for problem in problems))
 
 
 if __name__ == "__main__":

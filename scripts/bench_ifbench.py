@@ -36,6 +36,7 @@ DEFAULT_DATA = "data/ifbench_prompts.json"
 DEFAULT_NLTK_DATA = "/mnt/data/benchmark-venv/nltk_data"
 LEG_ID = "ifbench"
 EXIT_NOT_RUN = 2
+CLOSE_WAIT_S = 10
 
 PROBE_SRC = (
     "import json\n"
@@ -129,6 +130,8 @@ class WorkerChecker(Checker):
         self._stdin = process.stdin
         self._stdout = process.stdout
         self._ready = self._read_first_line()
+        # Injectable so a test can prove close() survives a worker that ignores SIGTERM.
+        self.close_wait_s: float = CLOSE_WAIT_S
 
     def _read_first_line(self) -> dict:
         """Parse the worker's startup handshake or report why it failed."""
@@ -165,9 +168,10 @@ class WorkerChecker(Checker):
         return data
 
     def close(self) -> None:
+        """Stop the worker; one that left already or ignores SIGTERM is not our problem."""
         try:
             self._proc.terminate()
-            self._proc.wait(timeout=10)
+            self._proc.wait(timeout=self.close_wait_s)
         except Exception:  # noqa: BLE001 - the worker already left or hangs; nothing to do
             pass
 

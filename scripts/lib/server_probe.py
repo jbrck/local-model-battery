@@ -152,17 +152,39 @@ class _Thinking:
 EMPTY_THINKING = _Thinking(None, None, None, None)
 
 
+def _first_model_id(models: dict) -> str | None:
+    """The id of the first entry in an OpenAI-style model list, or None when there is none."""
+    data = models.get("data") or []
+    first = data[0] if isinstance(data, list) and data else {}
+    if isinstance(first, dict) and first.get("id"):
+        return str(first["id"])
+    return None
+
+
 def _probe_models(cfg: ModelConfig) -> tuple[bool, str | None, tuple[str, ...]]:
     """Fallback reachability check for a server that is not llama.cpp and has no /props."""
     _, models, error = get_json(f"{cfg.endpoint.rstrip('/')}/models", cfg.api_key)
     errors = (f"models: {error}",) if error else ()
     if not isinstance(models, dict):
         return False, None, errors
-    data = models.get("data") or []
-    first = data[0] if isinstance(data, list) and data else {}
-    if isinstance(first, dict) and first.get("id"):
-        return True, str(first["id"]), errors
-    return False, None, errors
+    model_id = _first_model_id(models)
+    return (True, model_id, errors) if model_id else (False, None, errors)
+
+
+def _int_or_none(value: object) -> int | None:
+    """An int as reported, or None for anything the server typed loosely."""
+    return value if isinstance(value, int) else None
+
+
+def _props_fields(raw: dict | None) -> tuple[int | None, int | None, bool | None]:
+    """(ctx, slots, template mentions thinking) as /props reported them."""
+    defaults = raw.get("default_generation_settings") if raw else None
+    defaults = defaults if isinstance(defaults, dict) else {}
+    template = raw.get("chat_template") if raw else None
+    mentions = "enable_thinking" in template if isinstance(template, str) else None
+    return (_int_or_none(defaults.get("n_ctx")),
+            _int_or_none(raw.get("total_slots") if raw else None),
+            mentions)
 
 
 def _fetch_props(cfg: ModelConfig) -> _Props:
@@ -172,23 +194,15 @@ def _fetch_props(cfg: ModelConfig) -> _Props:
     if error:
         errors.append(f"props: {error}")
     raw = payload if isinstance(payload, dict) else None
-
-    defaults = raw.get("default_generation_settings") if raw else None
-    defaults = defaults if isinstance(defaults, dict) else {}
-    ctx = defaults.get("n_ctx")
-    slots = raw.get("total_slots") if raw else None
-    template = raw.get("chat_template") if raw else None
-    mentions_thinking = "enable_thinking" in template if isinstance(template, str) else None
-
+    ctx, slots, mentions = _props_fields(raw)
     reachable = raw is not None or status == 200
     served_model = None
     if not reachable:
         reachable, served_model, model_errors = _probe_models(cfg)
         errors.extend(model_errors)
     return _Props(reachable=reachable, served_model=served_model,
-                  ctx=ctx if isinstance(ctx, int) else None,
-                  slots=slots if isinstance(slots, int) else None,
-                  mentions_thinking=mentions_thinking, raw=raw, errors=tuple(errors))
+                  ctx=ctx, slots=slots,
+                  mentions_thinking=mentions, raw=raw, errors=tuple(errors))
 
 
 def _measure_thinking(cfg: ModelConfig, mentions_thinking: bool | None,

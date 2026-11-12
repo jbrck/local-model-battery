@@ -151,3 +151,24 @@ it in as instructions. It assumes nothing about which agent or runtime you use.
 
 Results are only comparable within a suite version. If you change a task, a rubric,
 or the request shape, bump the version and say so in the PR.
+
+Every change has to pass the quality gate on every method it touches. Three gates,
+per method: cyclomatic complexity ≤ 15, line coverage ≥ 80%, CRAP ≤ 8, where
+CRAP = complexity² × (1 − coverage)³ + complexity.
+
+```bash
+python3 path/to/quality-gauntlet/scripts/gauntlet.py --src-dir scripts --test-dir tests
+```
+
+A method over the CRAP line with high coverage is too complex — split it. Under the
+coverage line, test the branches it misses. Deleting dead code beats testing it: that
+is why the v1 scoring scripts are not here.
+
+```bash
+.venv/bin/python3 -m unittest discover -s tests -t .
+python3 scripts/check_catalogs.py
+```
+
+The second command is the repo's own guard against a lying catalog: every leg's entry
+script exists, every bundled data file matches its declared hash, and every leg is
+either ported or explicitly marked pending.

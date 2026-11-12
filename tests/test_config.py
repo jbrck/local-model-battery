@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from scripts.lib.config import (  # noqa: E402
     deep_merge,
+    file_md5,
     get_dotted,
     load_toml,
     repo_path,
@@ -65,6 +66,31 @@ class ConfigTest(unittest.TestCase):
 
     def test_sha256_prefix_returns_none_for_unreadable_file(self):
         self.assertIsNone(sha256_prefix("/nonexistent/file.json"))
+
+    def test_file_md5_matches_the_hashlib_digest(self):
+        payload = b"battery data\n"
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(payload)
+            path = handle.name
+        try:
+            self.assertEqual(file_md5(path), hashlib.md5(payload).hexdigest())
+        finally:
+            os.unlink(path)
+
+    def test_file_md5_streams_across_chunk_boundaries(self):
+        # One full 1 MiB chunk plus a remainder, so the streaming loop takes two bites.
+        payload = b"x" * (1024 * 1024 + 7)
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(payload)
+            path = handle.name
+        try:
+            self.assertEqual(file_md5(path), hashlib.md5(payload).hexdigest())
+        finally:
+            os.unlink(path)
+
+    def test_file_md5_is_empty_for_an_unreadable_file(self):
+        # The manifest treats a missing digest as a mismatch, never as a pass.
+        self.assertEqual(file_md5("/nonexistent/file.bin"), "")
 
 
 class StandardTest(unittest.TestCase):

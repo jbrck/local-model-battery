@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from scripts.lib.model import ModelConfig  # noqa: E402
 from scripts.lib.server_probe import (  # noqa: E402
+    ServerFacts,
     _thinking_switch_moved,
     probe_server,
     props_url,
@@ -133,6 +134,70 @@ class ProbeTest(unittest.TestCase):
         self.assertFalse(facts.tools_with_json_schema_ok)
         self.assertIn("grammar", facts.tools_error or "")
         self.assertTrue(any("engine" in error for error in facts.errors))
+
+
+class ModelsFallbackTest(unittest.TestCase):
+    """The /models fallback, for engines that serve no usable /props."""
+
+    def setUp(self):
+        self.routes: dict = {}
+
+    def probe(self) -> ServerFacts:
+        with JsonStub(self.routes) as stub:
+            cfg = ModelConfig(name="stub", endpoint=stub.endpoint, timeout_s=5)
+            return probe_server(cfg, run_thinking=False, run_tools=False)
+
+    def test_an_empty_model_list_is_not_reachable(self):
+        self.routes = {"/v1/models": (200, {"data": []})}
+        facts = self.probe()
+        self.assertFalse(facts.reachable)
+        self.assertIsNone(facts.served_model)
+
+    def test_a_model_list_that_is_not_an_object_is_not_reachable(self):
+        self.routes = {"/v1/models": (200, ["not", "an", "object"])}
+        facts = self.probe()
+        self.assertFalse(facts.reachable)
+
+    def test_a_data_field_that_is_not_a_list_is_not_reachable(self):
+        self.routes = {"/v1/models": (200, {"data": "unexpected"})}
+        facts = self.probe()
+        self.assertFalse(facts.reachable)
+
+    def test_an_entry_without_an_id_is_not_reachable(self):
+        self.routes = {"/v1/models": (200, {"data": [{"object": "model"}]})}
+        facts = self.probe()
+        self.assertFalse(facts.reachable)
+
+    def test_a_failing_models_call_is_reported_with_a_reason(self):
+        self.routes = {"/v1/models": (500, {"error": "boom"})}
+        facts = self.probe()
+        self.assertFalse(facts.reachable)
+        self.assertTrue(any("models" in error for error in facts.errors))
+
+
+class PropsShapeTest(unittest.TestCase):
+    """/props payloads that answer but do not match the expected shape."""
+
+    def probe(self, props_payload: object) -> ServerFacts:
+        routes = {"/props": (200, props_payload)}
+        with JsonStub(routes) as stub:
+            cfg = ModelConfig(name="stub", endpoint=stub.endpoint, timeout_s=5)
+            return probe_server(cfg, run_thinking=False, run_tools=False)
+
+    def test_loosely_typed_fields_read_as_unknown(self):
+        facts = self.probe({"default_generation_settings": "bogus",
+                            "total_slots": "4", "chat_template": 5})
+        self.assertTrue(facts.reachable)
+        self.assertIsNone(facts.ctx)
+        self.assertIsNone(facts.slots)
+        self.assertIsNone(facts.chat_template_mentions_thinking)
+        self.assertFalse(facts.window_is_known)
+
+    def test_a_props_payload_that_is_not_an_object_reports_no_window(self):
+        facts = self.probe(["unexpected"])
+        self.assertTrue(facts.reachable)
+        self.assertIsNone(facts.ctx)
+        self.assertIsNone(facts.props)
 
 
 if __name__ == "__main__":

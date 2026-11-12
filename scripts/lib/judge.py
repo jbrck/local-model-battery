@@ -73,8 +73,8 @@ def describe_contract(contract: dict) -> str:
     return ", ".join(parts) if parts else "none stated"
 
 
-def parse_scores(raw: str | None, expected_criteria: list[str]) -> list[dict] | None:
-    """Extract the scores array from a judge reply. Returns None if unusable."""
+def _score_payload(raw: str | None) -> dict | None:
+    """The JSON object inside a judge reply, fence and prose included, or None."""
     if not raw:
         return None
     start = raw.find("{")
@@ -82,25 +82,38 @@ def parse_scores(raw: str | None, expected_criteria: list[str]) -> list[dict] | 
     if start == -1 or end <= start:
         return None
     try:
-        payload = json.loads(raw[start:end + 1])
+        return json.loads(raw[start:end + 1])
     except json.JSONDecodeError:
         return None
 
+
+def _one_score(entry: dict, expected: str) -> dict | None:
+    """One rubric row clamped to the scale, or None when the score is not a number."""
+    try:
+        value = int(round(float(entry["score"])))
+    except (TypeError, ValueError, KeyError):
+        return None
+    return {
+        "criterion": str(entry.get("criterion") or expected),
+        "score": max(SCORE_MIN, min(SCORE_MAX, value)),
+        "justification": str(entry.get("justification", "")).strip(),
+    }
+
+
+def parse_scores(raw: str | None, expected_criteria: list[str]) -> list[dict] | None:
+    """Extract the scores array from a judge reply. Returns None if unusable."""
+    payload = _score_payload(raw)
+    if payload is None:
+        return None
     scores = payload.get("scores")
     if not isinstance(scores, list) or len(scores) != len(expected_criteria):
         return None
-
     cleaned = []
     for entry, expected in zip(scores, expected_criteria):
-        try:
-            value = int(round(float(entry.get("score"))))
-        except (TypeError, ValueError):
+        row = _one_score(entry, expected)
+        if row is None:
             return None
-        cleaned.append({
-            "criterion": str(entry.get("criterion") or expected),
-            "score": max(SCORE_MIN, min(SCORE_MAX, value)),
-            "justification": str(entry.get("justification", "")).strip(),
-        })
+        cleaned.append(row)
     return cleaned
 
 

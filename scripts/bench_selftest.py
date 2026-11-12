@@ -46,13 +46,18 @@ def _label(ok: bool, note: str) -> str:
     return f"pass: {note}" if ok else f"FAIL: {note}"
 
 
+def _model_ids(payload: dict) -> list[str]:
+    """The model ids a /v1/models payload lists, skipping malformed entries."""
+    entries = [entry for entry in payload.get("data") or [] if isinstance(entry, dict)]
+    return [str(entry.get("id", "")) for entry in entries]
+
+
 def _models_check(cfg: ModelConfig) -> tuple[bool, str, ChatResponse]:
     status, payload, error = get_json(cfg.models_url, cfg.api_key)
     response = ChatResponse(status=status, payload=payload, error=error)
     if error or not isinstance(payload, dict):
         return False, f"/v1/models did not answer: {error or 'no payload'}", response
-    entries = [entry for entry in payload.get("data") or [] if isinstance(entry, dict)]
-    ids = [str(entry.get("id", "")) for entry in entries]
+    ids = _model_ids(payload)
     if not any(cfg.name in model_id for model_id in ids):
         listed = ", ".join(ids[:5]) or "nothing"
         return False, f"model {cfg.name!r} not listed by /v1/models ({listed})", response

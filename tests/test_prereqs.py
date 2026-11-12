@@ -5,7 +5,9 @@ import os
 import sys
 import tempfile
 import unittest
+from importlib.machinery import ModuleSpec
 from pathlib import Path
+from types import ModuleType
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -101,6 +103,21 @@ class PathDependencyTest(unittest.TestCase):
         dependency = resolve_dependency("lcb_source", STANDARD, host_with())
         self.assertFalse(dependency.available)
 
+    def test_an_entry_not_declared_in_the_standard_is_reported_as_such(self):
+        dependency = resolve_dependency("lcb_data", {}, host_with())
+        self.assertFalse(dependency.available)
+        self.assertIn("not declared in standard.toml", dependency.detail)
+
+    def test_a_directory_where_the_data_file_belongs_is_reported(self):
+        with tempfile.TemporaryDirectory() as folder:
+            os.environ["LCB_DATA"] = folder
+            try:
+                dependency = resolve_dependency("lcb_data", STANDARD, host_with())
+            finally:
+                del os.environ["LCB_DATA"]
+        self.assertFalse(dependency.available)
+        self.assertIn("is not a file", dependency.detail)
+
 
 class NltkDependencyTest(unittest.TestCase):
     def test_nltk_is_reported_either_way_with_a_reason(self):
@@ -108,6 +125,42 @@ class NltkDependencyTest(unittest.TestCase):
         self.assertTrue(dependency.detail)
         if not dependency.available:
             self.assertIn("nltk", dependency.detail)
+
+    def setUp(self):
+        # The punkt check only runs when the nltk module imports, so the tests that
+        # exercise the corpus search stand in for an installed nltk.
+        module = ModuleType("nltk")
+        module.__spec__ = ModuleSpec("nltk", None)
+        self._previous = sys.modules.get("nltk")
+        sys.modules["nltk"] = module
+        self.addCleanup(self._uninstall_fake_nltk)
+
+    def _uninstall_fake_nltk(self):
+        if self._previous is None:
+            sys.modules.pop("nltk", None)
+        else:
+            sys.modules["nltk"] = self._previous
+
+    def test_a_punkt_corpus_under_nltk_data_is_available(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "tokenizers", "punkt").mkdir(parents=True)
+            os.environ["NLTK_DATA"] = folder
+            try:
+                dependency = resolve_dependency("nltk_data", STANDARD, host_with())
+            finally:
+                del os.environ["NLTK_DATA"]
+        self.assertTrue(dependency.available)
+        self.assertTrue(dependency.detail.endswith("tokenizers/punkt"))
+
+    def test_nltk_without_a_punkt_corpus_is_reported_as_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            os.environ["NLTK_DATA"] = folder
+            try:
+                dependency = resolve_dependency("nltk_data", STANDARD, host_with())
+            finally:
+                del os.environ["NLTK_DATA"]
+        self.assertFalse(dependency.available)
+        self.assertIn("no punkt corpus", dependency.detail)
 
 
 class JudgeDependencyTest(unittest.TestCase):

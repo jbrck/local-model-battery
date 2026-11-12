@@ -23,6 +23,7 @@ from scripts.bench_ifbench import (  # noqa: E402
     parse_probe,
     resolve_checker,
     run_items,
+    run_probe,
 )
 from scripts.lib.harness import LegArgs, leg_config  # noqa: E402
 
@@ -182,6 +183,20 @@ FAKE_WORKER = (
     "    print(json.dumps({'ok': True, 'registry': 2}))\n"
 )
 
+# A worker that ignores the term signal: close() must give up on it, not hang on it.
+STUBBORN_WORKER = (
+    "#!/usr/bin/env python3\n"
+    "import json, signal, sys, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "args = sys.argv\n"
+    "cmd = args[args.index('-c') + 1] if '-c' in args else ''\n"
+    "if 'def main()' in cmd:\n"
+    "    print(json.dumps({'id': 'ready', 'registry': 2}), flush=True)\n"
+    "    time.sleep(5)\n"
+    "else:\n"
+    "    print(json.dumps({'ok': True, 'registry': 2}))\n"
+)
+
 
 def write_fake_python(directory: str) -> str:
     path = os.path.join(directory, "fake_python")
@@ -189,6 +204,24 @@ def write_fake_python(directory: str) -> str:
         handle.write(FAKE_WORKER)
     os.chmod(path, 0o755)
     return path
+
+
+class CloseTest(unittest.TestCase):
+    """close() survives a worker that ignores SIGTERM instead of hanging on it."""
+
+    def test_a_worker_that_ignores_the_term_signal_does_not_hang_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "stubborn_python")
+            with open(fake, "w") as handle:
+                handle.write(STUBBORN_WORKER)
+            os.chmod(fake, 0o755)
+            checker, reason = resolve_checker(fake, os.path.join(tmp, "nl"))
+        self.assertIsNone(reason)
+        assert checker is not None
+        checker.close_wait_s = 0.2
+        checker.close()
+        checker._proc.kill()
+        checker._proc.wait(timeout=5)
 
 
 class FakeWorkerTest(unittest.TestCase):
@@ -275,6 +308,22 @@ class ClassifierUnitTest(unittest.TestCase):
         reason = classify_probe_failure(
             {"error": "ImportError: No module named 'ifbench'"}, "/x", "/n")
         self.assertIn("no usable 'ifbench' package", reason)
+
+    def test_the_abstract_checker_raises(self):
+        with self.assertRaises(NotImplementedError):
+            Checker().check("prompt", ["x"], [{}], "answer")
+
+    def test_a_slow_probe_reports_a_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            slow = os.path.join(tmp, "slow_python")
+            with open(slow, "w") as handle:
+                handle.write("#!/usr/bin/env python3\n"
+                             "import time\ntime.sleep(5)\n")
+            os.chmod(slow, 0o755)
+            stdout, reason = run_probe(slow, timeout=0.05)
+        self.assertIsNone(stdout)
+        assert reason is not None
+        self.assertIn("timed out probing", reason)
 
 
 class LooseVariantsTest(unittest.TestCase):

@@ -151,20 +151,33 @@ def _optional_float(text: str) -> float | None:
         return None
 
 
+def _gpu_error(result: subprocess.CompletedProcess[str]) -> str:
+    """What nvidia-smi complained about, truncated to one reportable line."""
+    stderr = (result.stderr or "").strip()[:200]
+    return stderr or "nvidia-smi failed"
+
+
+def _parse_gpu_line(line: str) -> Gpu | None:
+    """One CSV row from nvidia-smi, or None when the row is unusable."""
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) < 5 or not parts[0].isdigit():
+        return None
+    return Gpu(index=int(parts[0]), name=parts[1], vram_total_mb=int(parts[2]),
+               vram_used_mb=int(parts[3]), power_limit_w=_optional_float(parts[4]))
+
+
 def _query_gpus() -> tuple[tuple[Gpu, ...], str | None]:
     """Accelerators, or the reason there are none."""
     result = _run(["nvidia-smi", f"--query-gpu={GPU_QUERY}", "--format=csv,noheader,nounits"])
     if result is None:
         return (), "nvidia-smi not found or did not answer"
     if result.returncode != 0:
-        return (), (result.stderr or "nvidia-smi failed").strip()[:200] or "nvidia-smi failed"
+        return (), _gpu_error(result)
     gpus = []
     for line in result.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 5 or not parts[0].isdigit():
-            continue
-        gpus.append(Gpu(index=int(parts[0]), name=parts[1], vram_total_mb=int(parts[2]),
-                        vram_used_mb=int(parts[3]), power_limit_w=_optional_float(parts[4])))
+        gpu = _parse_gpu_line(line)
+        if gpu is not None:
+            gpus.append(gpu)
     return tuple(gpus), None if gpus else "nvidia-smi reported no devices"
 
 
@@ -184,17 +197,23 @@ def _query_compute_apps() -> tuple[dict, ...]:
     return tuple(apps)
 
 
-def _read_meminfo() -> tuple[float | None, float | None, float | None]:
-    """(total GB, available GB, swap used GB) from /proc/meminfo."""
-    if not os.path.isfile(MEMINFO_PATH):
-        return None, None, None
+def _meminfo_values(path: str) -> dict[str, float]:
+    """Keyed readings in GB from a /proc/meminfo-shaped file, junk rows dropped."""
     values: dict[str, float] = {}
-    with open(MEMINFO_PATH, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         for line in handle:
             name, _, rest = line.partition(":")
             fields = rest.split()
             if fields and fields[0].isdigit():
                 values[name.strip()] = int(fields[0]) / MEBIBYTE
+    return values
+
+
+def _read_meminfo() -> tuple[float | None, float | None, float | None]:
+    """(total GB, available GB, swap used GB) from /proc/meminfo."""
+    if not os.path.isfile(MEMINFO_PATH):
+        return None, None, None
+    values = _meminfo_values(MEMINFO_PATH)
     total = values.get("MemTotal")
     available = values.get("MemAvailable")
     swap_used = None
@@ -222,18 +241,21 @@ def _count_numa_nodes() -> int | None:
     return len(nodes) or None
 
 
+def _version_line(result: subprocess.CompletedProcess[str] | None) -> str | None:
+    """The first line a tool prints about itself, or None when it would not say."""
+    if result is None or result.returncode != 0:
+        return None
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    return lines[0][:VERSION_LINE_CHARS] if lines else None
+
+
 def _probe_tool(spec: ToolSpec) -> ToolFact:
     """Locate a tool (environment override first) and record the version it reports."""
     override = os.environ.get(spec.env_var, "") if spec.env_var else ""
     path = override or shutil.which(spec.name) or ""
     if not path:
         return ToolFact(spec.name)
-    result = _run([path, *spec.version_args])
-    version = None
-    if result is not None and result.returncode == 0:
-        lines = (result.stdout or result.stderr).strip().splitlines()
-        version = lines[0][:VERSION_LINE_CHARS] if lines else None
-    return ToolFact(spec.name, path, version)
+    return ToolFact(spec.name, path, _version_line(_run([path, *spec.version_args])))
 
 
 def probe_host(tool_specs: tuple[ToolSpec, ...] = DEFAULT_TOOL_SPECS) -> HostFacts:

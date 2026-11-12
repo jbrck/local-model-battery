@@ -165,27 +165,18 @@ def read_block(out_dir: Path, leg_id: str) -> dict | None:
         return None
 
 
-def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: str) -> dict:
-    """Run one leg and report what happened, including a leg that had to be stopped."""
-    log_dir = out_dir / LOG_DIR
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{planned.leg.id}.log"
-    command = leg_command(planned, args, out_dir, root, model)
-    limit = None if args.no_budget_kill else planned.budget_s or None
-    print(f"\n{'=' * 60}\n{planned.leg.id}: cap {planned.cap}, ctx {planned.ctx}, "
-          f"thinking {planned.thinking}, budget {planned.budget_s / 3600:.1f}h\n{'=' * 60}",
-          flush=True)
-    with open(log_path, "w") as log:
-        log.write(" ".join(command) + "\n\n")
-        log.flush()
-        killed = False
-        try:
-            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
-                                    check=False, timeout=limit)
-            code = result.returncode
-        except subprocess.TimeoutExpired:
-            killed = True
-            code = -1
+def _run_command(command: list[str], log, limit: int | None) -> tuple[int, bool]:
+    """Run one leg under its budget; returns (exit code, stopped at the budget)."""
+    try:
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                check=False, timeout=limit)
+        return result.returncode, False
+    except subprocess.TimeoutExpired:
+        return -1, True
+
+
+def _final_block(planned, out_dir: Path, log_path: Path, code: int, killed: bool) -> dict:
+    """The leg's own block if it wrote one, otherwise an honest failure block."""
     block = read_block(out_dir, planned.leg.id)
     if block is None:
         block = {"leg": planned.leg.id, "status": "timeout" if killed else "fail",
@@ -199,6 +190,23 @@ def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: 
     block["log"] = str(log_path)
     block["_live"] = True
     return block
+
+
+def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: str) -> dict:
+    """Run one leg and report what happened, including a leg that had to be stopped."""
+    log_dir = out_dir / LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{planned.leg.id}.log"
+    command = leg_command(planned, args, out_dir, root, model)
+    limit = None if args.no_budget_kill else planned.budget_s or None
+    print(f"\n{'=' * 60}\n{planned.leg.id}: cap {planned.cap}, ctx {planned.ctx}, "
+          f"thinking {planned.thinking}, budget {planned.budget_s / 3600:.1f}h\n{'=' * 60}",
+          flush=True)
+    with open(log_path, "w") as log:
+        log.write(" ".join(command) + "\n\n")
+        log.flush()
+        code, killed = _run_command(command, log, limit)
+    return _final_block(planned, out_dir, log_path, code, killed)
 
 
 def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -> dict:
@@ -245,12 +253,22 @@ def summarise(plan: RunPlan, results: dict) -> str:
     return "\n".join(lines)
 
 
+def _failed_legs(results: dict) -> list[str]:
+    """Legs that failed or were stopped at their budget."""
+    return [leg_id for leg_id, block in results.items()
+            if block.get("status") in FAILED_STATUSES]
+
+
+def _never_ran(plan: RunPlan, results: dict) -> list[str]:
+    """Planned legs whose block still says they did not run."""
+    return [planned.leg.id for planned in plan.legs
+            if results.get(planned.leg.id, {}).get("status") == PENDING_STATUS]
+
+
 def verdict(plan: RunPlan, results: dict, strict: bool) -> int:
     """Zero when the run is usable, one when something planned did not happen."""
-    broken = [leg_id for leg_id, block in results.items()
-              if block.get("status") in FAILED_STATUSES]
-    absent = [planned.leg.id for planned in plan.legs
-              if results.get(planned.leg.id, {}).get("status") == PENDING_STATUS]
+    broken = _failed_legs(results)
+    absent = _never_ran(plan, results)
     if broken:
         print("\nfailed legs: " + ", ".join(sorted(broken)), file=sys.stderr)
     if absent:

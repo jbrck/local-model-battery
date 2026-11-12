@@ -12,14 +12,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.bench_selftest import (  # noqa: E402
     CHECK_NAMES,
+    _catalog_entries,
     _chat_check,
     _leg_import_check,
+    _model_ids,
     _models_check,
     _thinking_check,
     main,
 )
 from scripts.lib.harness import LegArgs, leg_config  # noqa: E402
 from scripts.lib.model import ModelConfig  # noqa: E402
+from tests import fixtures  # noqa: E402
 from tests.stub_json import JsonStub, completion  # noqa: E402
 
 MODEL = "test-model"
@@ -60,6 +63,15 @@ class ModelsCheckTest(StubCase):
         ok, note, _ = _models_check(self.cfg(stub))
         self.assertFalse(ok)
         self.assertIn("/v1/models", note)
+
+    def test_a_payload_without_model_entries_lists_nothing(self):
+        stub = self.start_stub({"/v1/models": (200, {"data": [42, None, "garbage"]})})
+        ok, note, _ = _models_check(self.cfg(stub))
+        self.assertFalse(ok)
+        self.assertIn("nothing", note)
+
+    def test_malformed_entries_are_skipped_not_crashed_on(self):
+        self.assertEqual(_model_ids({"data": [{"id": "a"}, 7, {}]}), ["a", ""])
 
 
 class ChatCheckTest(StubCase):
@@ -126,6 +138,20 @@ class ImportCheckTest(unittest.TestCase):
             ok, note = _leg_import_check([("good", good)])
             self.assertTrue(ok)
             self.assertIn("1 in-repo", note)
+
+
+class CatalogEntriesTest(unittest.TestCase):
+    """The default entry list comes from the real catalog and points at real files."""
+
+    def test_every_entry_belongs_to_an_implemented_leg(self):
+        entries = _catalog_entries()
+        self.assertTrue(entries, "the shipped catalog has implemented legs")
+        implemented = {leg.id for leg in fixtures.LEGS if leg.implemented}
+        self.assertEqual({leg_id for leg_id, _ in entries}, implemented)
+
+    def test_every_entry_path_exists(self):
+        for _leg_id, path in _catalog_entries():
+            self.assertTrue(os.path.isfile(path), path)
 
 
 class GateTest(StubCase):

@@ -90,6 +90,24 @@ class CatalogTest(unittest.TestCase):
     def test_all_legs_sentinel_is_used_for_global_knobs(self):
         self.assertEqual(self.by_id["ctx"].applies_to, (ALL_LEGS,))
 
+    def test_class_names_are_spelled_out_for_the_sheet(self):
+        self.assertEqual(make_variable(variable_class="M").class_name, "measurement")
+        self.assertEqual(make_variable(variable_class="C").class_name, "capacity")
+        self.assertEqual(make_variable(variable_class="D").class_name, "dependency")
+
+    def test_to_dict_lists_every_field_the_catalog_records(self):
+        variable = make_variable(applies_to=("math500", "mmlu"))
+        payload = variable.to_dict()
+        self.assertEqual(payload["id"], "sample")
+        self.assertEqual(payload["class"], "M")
+        self.assertEqual(payload["class_name"], "measurement")
+        self.assertEqual(payload["applies_to"], ["math500", "mmlu"])
+        self.assertEqual(payload["stamp_key"], "sample")
+        self.assertEqual(payload["what_it_changes"], "something")
+        self.assertEqual(payload["effect"], "nothing measured yet")
+        self.assertEqual(payload["source"], "test")
+        self.assertEqual(payload["decision_rule"], "take the default")
+
 
 class ValidationTest(unittest.TestCase):
     def setUp(self):
@@ -120,6 +138,10 @@ class ValidationTest(unittest.TestCase):
                     items=1, budget_floor=1)]
         problems = validate_variables([make_variable()], legs)
         self.assertTrue(any("not named by any variable" in problem for problem in problems))
+
+    def test_a_duplicate_variable_id_is_reported(self):
+        problems = validate_variables([make_variable(), make_variable()], self.legs)
+        self.assertTrue(any("duplicate variable id" in problem for problem in problems))
 
 
 if __name__ == "__main__":
