@@ -32,11 +32,16 @@ class Dependency:
 
 @dataclass(frozen=True)
 class Judge:
-    """The scoring model for the writing suite. It must not be the model under test."""
+    """The scoring model for the writing suite. It must not be the model under test.
+
+    `pinned` is true when the standard supplied the model rather than the operator,
+    which is what makes two runs' writing scores comparable.
+    """
 
     model: str | None = None
     endpoint: str | None = None
     under_test: str | None = None
+    pinned: bool = False
 
     @property
     def configured(self) -> bool:

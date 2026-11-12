@@ -132,6 +132,16 @@ class MeasuredCostTest(unittest.TestCase):
         self.assertEqual([item.label for item in options], ["keep thinking on", "turn it off"])
         self.assertIn("off-standard", options[1].consequence)
 
+    def test_a_footprint_serialises_to_gigabytes_and_a_reason(self):
+        known = model_footprint(FITS, STANDARD).to_dict()
+        self.assertEqual(known["weights_gb"], 16.4)
+        self.assertEqual(known["kv_type"], "q8_0")
+        self.assertTrue(known["known"])
+        self.assertEqual(known["missing"], [])
+        blind = model_footprint(SHAPELESS, STANDARD).to_dict()
+        self.assertFalse(blind["known"])
+        self.assertTrue(blind["missing"])
+
     def test_a_model_that_barely_fits_is_asked_about_its_window(self):
         fat = dict(FITS)
         fat["weights_gb"] = 20.0

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import plan_run as cli  # noqa: E402
 from tests import fixtures  # noqa: E402
+from tests.stub_json import JsonStub, completion  # noqa: E402
 
 PROFILE = """id = "cli-test"
 weights_gb = 16.4
@@ -31,6 +32,47 @@ n_kv_heads = 8
 head_dim = 128
 kv_type = "q8_0"
 """
+
+
+class ProbeWiringTest(unittest.TestCase):
+    """The probe path: the gate re-checks what the plan saw, so the probes have to come back."""
+
+    ROUTES = {
+        "/props": (200, {"default_generation_settings": {"n_ctx": 65536}, "total_slots": 2,
+                         "chat_template": "{{ enable_thinking }}"}),
+        "/v1/models": (200, {"data": [{"id": "stub"}]}),
+        "/v1/chat/completions": (200, completion("ok", tokens=120)),
+    }
+
+    def _args(self, path: Path, endpoint: str, no_probe: bool) -> argparse.Namespace:
+        return argparse.Namespace(profile=str(path), endpoint=endpoint, model="",
+                                  api_key="not-needed", legs="math500", judge_model="",
+                                  judge_endpoint="", no_probe=no_probe)
+
+    def test_the_probe_path_hands_back_host_endpoint_and_pilot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cli-test.toml"
+            path.write_text(PROFILE)
+            with JsonStub(dict(self.ROUTES)) as stub:
+                plan, host, server, pilot = cli.probe_from_args(
+                    self._args(path, stub.endpoint, no_probe=False))
+        self.assertEqual(plan.model, "cli-test")
+        self.assertTrue(server.reachable)
+        self.assertEqual(server.ctx, 65536)
+        self.assertTrue(pilot.usable)
+        self.assertGreater(pilot.generated_tokens, 0)
+        self.assertGreater(host.ram_total_gb, 0)
+
+    def test_the_probe_path_stands_down_on_no_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cli-test.toml"
+            path.write_text(PROFILE)
+            plan, _, server, pilot = cli.probe_from_args(
+                self._args(path, "http://127.0.0.1:1/v1", no_probe=True))
+        self.assertFalse(server.reachable)
+        self.assertFalse(pilot.usable)
+        self.assertEqual(pilot.tps, 0.0)
+        self.assertTrue(plan is not None)
 
 
 class CliTest(unittest.TestCase):

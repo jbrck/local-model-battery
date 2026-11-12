@@ -151,3 +151,19 @@ against existing reference rows.
   switch and the reason (spilled weights pay RAM bandwidth for every reasoning token).
 - A window limited below lcb's budget now names lcb and says what it breaks: below 114688 plus
   headroom that leg stops at the context limit instead of scoring what its cap allows.
+
+## The v1 scoring toolchain is gone, and the judge is pinned (2026-11-12)
+
+- Deleting beats testing what nothing calls: `report_scores.py`, `validate_suite.py`,
+  `score_writing.py`, `build_scoring_corpus.py`, `lib/reporting.py` and the v1 writing
+  test are removed. The v2 writing leg generates with `bench_writing_generate.py` and
+  scores through `lib/judge.py`, so the three-phase path was dead weight still carrying
+  a gate bill. That single deletion cleared 31 of the 51 gate failures.
+- `lib/reporting.py`'s only live callers were `elapsed` and `start_timer` in the
+  orchestrator. Two functions now live where they are used.
+- The standard pins the judge model (`standard.toml [judge] model = "nous-glm-5-3-flash"`).
+  The judge is a comparability key, so it cannot be a per-run guess; the endpoint stays the
+  operator's, and empty means the endpoint the run itself uses. `--judge-model` still wins.
+- The plan sheet now names the layer that set the judge: `(standard)` when the pin supplied
+  it, `(profile)` when the operator did. Before this the sheet credited every judge to the
+  profile, including a judge no profile ever mentioned.

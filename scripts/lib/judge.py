@@ -140,3 +140,16 @@ def _excerpt(raw: str | None) -> str:
     if not raw:
         return "no reply"
     return re.sub(r"\s+", " ", raw)[:200]
+
+
+def resolve_judge_defaults(model: str, endpoint: str, run_endpoint: str,
+                           standard: dict) -> tuple[str, str]:
+    """The judge the standard pins, unless the operator named one.
+
+    The judge model is a comparability key: two runs only compare when the same model
+    scored both, so the pin lives in the standard. The endpoint stays the operator's,
+    because the judge lives wherever their proxy is; an empty endpoint means the judge
+    is served from the same place the run is.
+    """
+    pin = standard.get("judge") or {}
+    return model or pin.get("model", ""), endpoint or pin.get("endpoint", "") or run_endpoint

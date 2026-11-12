@@ -36,8 +36,8 @@ if [ "$missing" -eq 1 ]; then
     exit 1
 fi
 
-echo "==> Validating the writing suite..."
-python3 scripts/validate_suite.py
+echo "==> Checking the catalog..."
+python3 scripts/check_catalogs.py
 
 echo "==> Running tests..."
 python3 -m unittest discover -s tests -q
@@ -56,7 +56,6 @@ echo "     python scripts/run_battery.py --model MyModel \\"
 echo "       --endpoint http://localhost:11434/v1"
 echo ""
 echo "Writing scores need a judge model that is not under test:"
-echo "     python scripts/bench_writing_generate.py --model MyModel"
-echo "     python scripts/build_scoring_corpus.py"
-echo "     python scripts/score_writing.py --judge-model JudgeAlias \\"
-echo "       --judge-endpoint http://localhost:8080/v1"
+echo "     python scripts/bench_writing_generate.py --model MyModel \\"
+echo "       --judge-model nous-glm-5-3-flash \\"
+echo "       --judge-endpoint http://localhost:4000/v1"

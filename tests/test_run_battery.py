@@ -21,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import run_battery  # noqa: E402
+from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.plan_run import PlannedLeg, Skip  # noqa: E402
 from tests import fixtures  # noqa: E402
 
@@ -68,6 +69,47 @@ class FakeRun(unittest.TestCase):
                     out=str(self.out), resume=False, no_budget_kill=False)
         base.update(changes)
         return argparse.Namespace(**base)
+
+
+class JudgeWiringTest(FakeRun):
+    """The judge reaches the writing leg's command line, and no other leg's."""
+
+    def writing(self) -> PlannedLeg:
+        leg = replace(fixtures.BY_ID["writing"], implementation="in_repo",
+                      entry="scripts/bench_writing_generate.py",
+                      data="data/writing_suite_v1.json")
+        return PlannedLeg(leg=leg, cap=16384, ctx=131072, thinking="n/a", budget_s=0,
+                          case_timeout_s=900)
+
+    def test_the_writing_leg_gets_the_judge_flags(self):
+        args = self.args(judge_model="nous-glm-5-3-flash",
+                         judge_endpoint="http://judge:4000/v1")
+        command = run_battery.leg_command(self.writing(), args, self.out, str(self.root),
+                                          "arete-27b")
+        self.assertEqual(command[command.index("--judge-model") + 1], "nous-glm-5-3-flash")
+        self.assertEqual(command[command.index("--judge-endpoint") + 1], "http://judge:4000/v1")
+
+    def test_a_leg_with_no_judge_prereq_never_sees_the_flags(self):
+        args = self.args(judge_model="nous-glm-5-3-flash",
+                         judge_endpoint="http://judge:4000/v1")
+        command = run_battery.leg_command(self.planned(), args, self.out, str(self.root),
+                                          "arete-27b")
+        self.assertNotIn("--judge-model", command)
+        self.assertNotIn("--judge-endpoint", command)
+
+    def test_the_standard_pins_the_judge_when_the_operator_is_silent(self):
+        pin = load_toml(run_battery.STANDARD_FILE).get("judge") or {}
+        self.assertTrue(pin.get("model"), "the standard must pin a judge model")
+        args = self.args(judge_model="", judge_endpoint="")
+        run_battery.resolve_judge(args)
+        self.assertEqual(args.judge_model, pin["model"])
+        self.assertEqual(args.judge_endpoint, args.endpoint)
+
+    def test_the_operator_beats_the_pin(self):
+        args = self.args(judge_model="my-judge", judge_endpoint="http://mine/v1")
+        run_battery.resolve_judge(args)
+        self.assertEqual(args.judge_model, "my-judge")
+        self.assertEqual(args.judge_endpoint, "http://mine/v1")
 
 
 class MissingReasonTest(FakeRun):

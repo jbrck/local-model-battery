@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.env_probe import probe_host  # noqa: E402
+from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.model import ModelConfig  # noqa: E402
 from scripts.lib.pilot import run_pilot  # noqa: E402
@@ -45,6 +46,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _probes(args: argparse.Namespace, cfg: ModelConfig):
+    """The endpoint and pilot the plan is built from, or the honest stubs when probing is off.
+
+    Probing is what separates a sheet built on measurements from one built on guesses, so the
+    off switch says so in the facts it hands back rather than pretending they are unknown.
+    """
+    if args.no_probe:
+        return _unprobed_server(cfg), _unprobed_pilot()
+    return probe_server(cfg), run_pilot(cfg)
+
+
+def _judge(args: argparse.Namespace, cfg: ModelConfig, standard: dict) -> Judge:
+    """The writing suite's scorer, or a judge that reports the leg as unscored."""
+    model, endpoint = resolve_judge_defaults(args.judge_model, args.judge_endpoint,
+                                             cfg.endpoint, standard)
+    pinned = not args.judge_model and bool((standard.get("judge") or {}).get("model"))
+    return Judge(model=model or None, endpoint=endpoint or None, under_test=cfg.name,
+                 pinned=pinned)
+
+
 def probe_from_args(args: argparse.Namespace):
     """Plan the run and hand back the raw probes the plan was built from.
 
@@ -59,10 +80,8 @@ def probe_from_args(args: argparse.Namespace):
     host = probe_host()
     cfg = ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
                       api_key=args.api_key)
-    server = probe_server(cfg) if not args.no_probe else _unprobed_server(cfg)
-    pilot = run_pilot(cfg) if not args.no_probe else _unprobed_pilot()
-    judge = Judge(model=args.judge_model or None, endpoint=args.judge_endpoint or None,
-                  under_test=cfg.name)
+    server, pilot = _probes(args, cfg)
+    judge = _judge(args, cfg, standard)
     selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
     plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected)
     return plan, host, server, pilot

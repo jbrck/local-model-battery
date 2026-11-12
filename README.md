@@ -54,8 +54,7 @@ python scripts/run_battery.py --model MyModel \
 
 ## Writing suite
 
-Three separated phases. The split exists so generation never sees a score, and
-the judge never sees a model name.
+Two phases. Generation never sees a score, and the judge never sees a model name.
 
 **1. Generate.** Thin pipe: one user message, task text verbatim, temperature
 0.7, 16k tokens, no system prompt, no cleaning, no retries.
@@ -68,38 +67,26 @@ python scripts/bench_writing_generate.py --model MyModel \
 Answers land in `answers/<model>/<task_id>.json` with the full request body and
 raw response for audit. An empty answer is recorded as empty, not retried.
 
-**2. Build the blind corpus.** Strips model identity, renames every answer to an
-opaque ID, shuffles with a seed.
+**2. Score.** The judge is a model that is not under test. Pass it explicitly,
+because there is no default. Pin it: a score is only comparable against another
+run on the same judge.
 
 ```bash
-python scripts/build_scoring_corpus.py --suite data/writing_suite_v1.json
-```
-
-Produces `scoring/corpus/` (what the judge reads) and `scoring/key.json` (opaque
-ID → model). The key lives outside the corpus on purpose: the scoring step cannot
-read it.
-
-**3. Score blind.** Any capable model can judge. Pass it explicitly — there is no
-default judge.
-
-```bash
-python scripts/score_writing.py \
-  --judge-model JudgeAlias --judge-endpoint http://localhost:8080/v1
+python scripts/bench_writing_generate.py --model MyModel \
+  --endpoint http://localhost:11434/v1 \
+  --judge-model nous-glm-5-3-flash --judge-endpoint http://localhost:4000/v1
 ```
 
 Each answer is scored against its task rubric, 1-10 per criterion, with the
 anchors supplied in the prompt. Empty answers take the floor score without a
 judge call. Unparseable judge replies are recorded as errors, never as scores.
+With no judge the leg still generates everything, reports itself as not scored
+and names what is missing. `WRITING_JUDGE_MODEL` and `WRITING_JUDGE_ENDPOINT` do
+the same job when `run_battery.py` drives the run, and the judge model lands in
+the manifest as a comparability key.
 
-**4. Join and report.**
-
-```bash
-python scripts/report_scores.py --scores scoring/scores-<timestamp>.json
-```
-
-Reports overall mean, per-category mean, per-criterion mean, empty rate, and
-character/word compliance. Compliance is counted from the answer text by script;
-the judge never scores it.
+Re-scoring stored answers is cheap, so changing the judge never means repeating
+generation.
 
 ### Rules that make the scores comparable
 
@@ -109,8 +96,8 @@ the judge never scores it.
 - Only the `content` channel is scored. Models that put everything in a reasoning
   channel score as empty — that is model behavior, and it is the same rule for
   everyone.
-- Judge version pinned in the score file. Changing the judge means re-scoring
-  stored answers (cheap; generation never repeats).
+- Judge model pinned in the result block and the manifest. Changing the judge
+  means re-scoring stored answers, which is cheap; generation never repeats.
 - The judge must not be a model under test.
 
 ## Individual benchmarks

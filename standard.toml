@@ -33,6 +33,14 @@ kv_v = "q8_0"
 temperature = 0.0
 seed = 42
 
+[judge]
+# The scoring model for the writing leg. Part of the comparability key: two runs only
+# compare when the same judge scored both. The endpoint is the operator's (empty means
+# "the endpoint the run itself uses"), because the judge lives wherever their proxy is.
+# The judge must never be a model under test.
+model = "nous-glm-5-3-flash"
+endpoint = ""
+
 [limits]
 math500 = 500
 humaneval_plus = 164

@@ -765,9 +765,12 @@ def _judge_decision(inputs: _PlanInputs) -> Decision:
     judge = inputs.judge
     writing_selected = any(planned.id == "writing" for planned in inputs.planned)
     if judge and judge.configured:
+        source = STANDARD if judge.pinned else PROFILE
+        pinned_note = ("; pinned in the standard, so two runs compare" if judge.pinned
+                       else "")
         return Decision("judge_model", KIND_MEASUREMENT, str(judge.model), "n/a",
-                        f"scored by {judge.model} at {judge.endpoint}; the judge must never be "
-                        f"the model under test", PROFILE)
+                        f"scored by {judge.model} at {judge.endpoint}{pinned_note}; the judge "
+                        f"must never be the model under test", source)
     return Decision("judge_model", KIND_MEASUREMENT, "none configured", "n/a",
                     "the writing suite can generate but cannot be scored", PROFILE,
                     options=(

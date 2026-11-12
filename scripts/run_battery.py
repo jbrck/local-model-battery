@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.harness import RESULT_SUFFIX  # noqa: E402
+from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.plan_run import RunPlan  # noqa: E402
 from scripts.plan_run import probe_from_args  # noqa: E402
 from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
-from scripts.lib.reporting import elapsed, start_timer  # noqa: E402
 from scripts import manifest  # noqa: E402
 from scripts import preflight  # noqa: E402
 
@@ -43,6 +44,23 @@ STANDARD_FILE = "standard.toml"
 LEGS_DIR = "legs"
 LOG_DIR = "logs"
 PENDING_STATUS = "not run"
+
+
+def start_timer() -> float:
+    """Wall-clock start, in seconds."""
+    return time.time()
+
+
+def elapsed(start: float) -> str:
+    """Elapsed wall time as a short human string."""
+    seconds = int(time.time() - start)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    return f"{minutes}m {seconds}s"
+
+
 FAILED_STATUSES = ("fail", "timeout")
 
 
@@ -130,6 +148,8 @@ def leg_command(planned, args: argparse.Namespace, out_dir: Path, root: str,
                "--timeout", str(planned.case_timeout_s)]
     if planned.leg.data:
         command += ["--data", str(Path(root) / planned.leg.data)]
+    if "judge_endpoint" in planned.leg.prereqs and args.judge_model:
+        command += ["--judge-model", args.judge_model, "--judge-endpoint", args.judge_endpoint]
     command += list(planned.extra_args)
     return command
 
@@ -255,8 +275,15 @@ def gate(plan: RunPlan, args: argparse.Namespace, probes) -> list:
     return checks
 
 
+def resolve_judge(args: argparse.Namespace) -> None:
+    """Fill the judge from the standard pin, so every run scores with the same model."""
+    args.judge_model, args.judge_endpoint = resolve_judge_defaults(
+        args.judge_model, args.judge_endpoint, args.endpoint, load_toml(STANDARD_FILE))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    resolve_judge(args)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     timer = start_timer()
     plan, host, server, pilot = load_plan(args)
