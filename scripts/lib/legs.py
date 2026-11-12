@@ -55,6 +55,7 @@ class Leg:
     items: int = 0
     budget_floor: int = 0
     data: str = ""
+    interpreter: str = ""
 
     @property
     def implemented(self) -> bool:
@@ -72,6 +73,7 @@ class Leg:
             "comparability_keys": list(self.comparability_keys),
             "known_failures": list(self.known_failures), "gate": self.gate,
             "items": self.items, "budget_floor": self.budget_floor, "data": self.data,
+            "interpreter": self.interpreter,
         }
 
 
@@ -102,6 +104,7 @@ def load_legs(standard: dict, path: str = LEGS_FILE) -> list[Leg]:
             items=int(items.get(leg_id, 0)),
             budget_floor=int(floors.get(leg_id, 0)),
             data=str(raw.get("data", "")),
+            interpreter=str(raw.get("interpreter", "")),
         ))
     return legs
 
@@ -174,6 +177,17 @@ def _check_prereqs(leg: Leg) -> list[str]:
     ]
 
 
+def _check_interpreter(leg: Leg) -> list[str]:
+    """A declared interpreter is how a leg borrows another venv's dependencies.
+
+    It has to be absolute: the orchestrator runs legs from its own working directory, so a
+    relative interpreter would resolve to whatever directory that happens to be.
+    """
+    if leg.interpreter and not leg.interpreter.startswith("/"):
+        return [f"{leg.id}: interpreter {leg.interpreter!r} must be an absolute path"]
+    return []
+
+
 def validate_legs(legs: list[Leg], raw: list[dict] | None = None) -> list[str]:
     """Return a list of problems. Empty means the catalog is usable."""
     problems: list[str] = []
@@ -184,6 +198,7 @@ def validate_legs(legs: list[Leg], raw: list[dict] | None = None) -> list[str]:
         problems.extend(_check_enums(leg))
         problems.extend(_check_shape(leg))
         problems.extend(_check_prereqs(leg))
+        problems.extend(_check_interpreter(leg))
     for entry in raw or []:
         problems.extend(
             f"leg {entry.get('id', '?')}: missing field {name!r}"

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.legs import (  # noqa: E402
     Leg,
+    legs_by_id,
     load_legs,
     load_raw_legs,
     resolve_cap,
@@ -145,6 +146,25 @@ class ValidationTest(unittest.TestCase):
     def test_a_leg_without_comparability_keys_is_reported(self):
         problems = validate_legs([make_leg(comparability_keys=())])
         self.assertTrue(any("comparability key" in problem for problem in problems))
+
+
+class InterpreterTest(unittest.TestCase):
+    """A leg can borrow another venv's interpreter, which is how the LCB leg runs at all."""
+
+    def test_the_lcb_leg_declares_the_interpreter_its_prompt_helpers_need(self):
+        leg = legs_by_id(load_legs(load_toml("standard.toml")))["lcb"]
+        self.assertEqual(leg.interpreter, "/mnt/data/benchmark-venv/bin/python3")
+        self.assertEqual(leg.to_dict()["interpreter"], leg.interpreter)
+
+    def test_a_leg_without_one_borrows_nothing(self):
+        self.assertEqual(make_leg().interpreter, "")
+
+    def test_a_relative_interpreter_is_reported(self):
+        problems = validate_legs([make_leg(interpreter="python3")])
+        self.assertIn("must be an absolute path", " ".join(problems))
+
+    def test_an_absolute_interpreter_is_accepted(self):
+        self.assertEqual(validate_legs([make_leg(interpreter="/usr/bin/python3")]), [])
 
 
 if __name__ == "__main__":

@@ -436,5 +436,33 @@ class ScriptEntryTest(unittest.TestCase):
         self.assertIn("cap 8192", sheet)
 
 
+class InterpreterSheetTest(unittest.TestCase):
+    """The sheet has to say when a leg runs under a different interpreter, and why."""
+
+    def lcb_plan(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        Path(folder.name, "test6.jsonl").write_text('{"question_id": 1}\n')
+        present = copy.deepcopy(STANDARD)
+        for entry in present["data"]["external"]:
+            if entry["id"] == "lcb_data":
+                entry["path"] = str(Path(folder.name, "test6.jsonl"))
+                entry["sha256_16"] = ""
+            if entry["id"] == "lcb_source":
+                entry["path"] = folder.name
+        return plan(FITS, standard=present, selected=("lcb", "math500"))
+
+    def test_a_leg_that_borrows_an_interpreter_says_so(self):
+        row = decision(self.lcb_plan(), "interpreter:lcb")
+        self.assertEqual(row.kind, KIND_DEPENDENCY)
+        self.assertEqual(row.chosen, BY_ID["lcb"].interpreter)
+        self.assertIn("minute zero", row.consequence)
+
+    def test_a_leg_that_borrows_nothing_has_no_row(self):
+        rows = [row.variable for row in plan(SMALL, selected=FREE).decisions]
+        self.assertNotIn("interpreter:math500", rows)
+        self.assertNotIn("interpreter:mmlu", rows)
+
+
 if __name__ == "__main__":
     unittest.main()

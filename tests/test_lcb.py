@@ -229,5 +229,83 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(result["detail"], {"0": 1.0, "1": 0.0})
 
 
+def write_module(path: str, body: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(body)
+
+
+def fake_checkout(root: str) -> str:
+    """A stand-in for the LiveCodeBench checkout: the four symbols load_helpers imports."""
+    write_module(os.path.join(root, "lcb_runner", "__init__.py"), "")
+    write_module(os.path.join(root, "lcb_runner", "lm_styles.py"),
+                 "class LMStyle:\n    OpenAIChat = 'chat'\n")
+    write_module(os.path.join(root, "lcb_runner", "benchmarks", "__init__.py"), "")
+    write_module(os.path.join(root, "lcb_runner", "benchmarks", "code_generation.py"),
+                 "class CodeGenerationProblem:\n"
+                 "    def __init__(self, **fields):\n"
+                 "        self.fields = fields\n")
+    write_module(os.path.join(root, "lcb_runner", "prompts", "__init__.py"), "")
+    write_module(os.path.join(root, "lcb_runner", "prompts", "code_generation.py"),
+                 "def format_prompt_generation(problem, style):\n"
+                 "    return [{'role': 'user', 'content': problem.fields['question_content']}]\n")
+    write_module(os.path.join(root, "lcb_runner", "utils", "__init__.py"), "")
+    write_module(os.path.join(root, "lcb_runner", "utils", "extraction_utils.py"),
+                 "def extract_code(content, style):\n"
+                 "    return 'CODE' if '```' in content else None\n")
+    return root
+
+
+class CheckoutHelpersTest(unittest.TestCase):
+    """load_helpers is the seam between this leg and the interpreter that owns the checkout."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.src = fake_checkout(os.path.join(self.tmp.name, "checkout"))
+
+    def test_the_prompt_comes_from_the_checkout_helper(self):
+        helpers = lcb.load_helpers(self.src)
+        prompt = helpers.format_prompt({"question_id": "q1", "question_content": "sum two"})
+        self.assertEqual(prompt, [{"role": "user", "content": "sum two"}])
+
+    def test_a_fenced_answer_is_extracted_and_prose_comes_back_empty(self):
+        helpers = lcb.load_helpers(self.src)
+        self.assertEqual(helpers.extract_code("```python\npass\n```"), "CODE")
+        self.assertEqual(helpers.extract_code("no code at all"), "")
+
+    def test_the_import_leaves_the_working_directory_where_it_found_it(self):
+        before = os.getcwd()
+        lcb.load_helpers(self.src)
+        self.assertEqual(os.getcwd(), before)
+
+    def test_an_interpreter_without_the_dependencies_names_itself(self):
+        empty = os.path.join(self.tmp.name, "empty_checkout")
+        os.makedirs(empty)
+        for cached in [name for name in sys.modules if name.startswith("lcb_runner")]:
+            del sys.modules[cached]
+        with self.assertRaises(lcb.CheckoutImportError) as caught:
+            lcb.load_helpers(empty)
+        self.assertIn(sys.executable, str(caught.exception))
+        self.assertIn("interpreter field", str(caught.exception))
+
+    def tearDown(self):
+        for cached in [name for name in sys.modules if name.startswith("lcb_runner")]:
+            del sys.modules[cached]
+        if self.src in sys.path:
+            sys.path.remove(self.src)
+
+
+class WrongInterpreterTest(LegTest):
+    def test_a_checkout_that_cannot_import_fails_the_leg_and_names_the_interpreter(self):
+        reason = (f"{sys.executable} cannot import the checkout's helpers "
+                  f"(No module named 'datasets')")
+        lcb.load_helpers = mock.Mock(side_effect=lcb.CheckoutImportError(reason))
+        block = self.run_leg()
+        self.assertEqual(block["status"], "not run")
+        self.assertEqual(block["wrong_interpreter"], sys.executable)
+        self.assertIn("datasets", block["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

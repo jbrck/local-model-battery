@@ -261,6 +261,9 @@ thinking = "primary_on"
 thinking_effect = "removing the reasoning budget moved 66% -> 76% and added about 8 hours"
 prereqs = ["lcb_source", "lcb_data"]
 resume = "done_marker"
+# The prompt helpers come from the checkout, so this leg runs under an interpreter that
+# carries lcb_runner's dependencies. The repo's own venv has no datasets.
+interpreter = "/mnt/data/benchmark-venv/bin/python3"
 comparability_keys = ["cap", "ctx", "thinking", "items_sha", "slots"]
 known_failures = [
   "16 of 100 problems never emitted a code block and consumed 7.4 of 14.1 hours",

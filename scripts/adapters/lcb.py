@@ -80,12 +80,18 @@ def parse_args(argv: list[str] | None = None) -> LcbArgs:
     return LcbArgs(**vars(parser.parse_args(argv)))
 
 
-def load_helpers(src: str) -> Helpers:  # pragma: no cover - needs the checkout named by --src
+class CheckoutImportError(RuntimeError):
+    """The interpreter running this leg cannot import the checkout's prompt helpers."""
+
+
+def load_helpers(src: str) -> Helpers:
     """Import the prompt and extraction helpers from the checkout named by --src.
 
-    Inline imports: the checkout path is a runtime flag, so lcb_runner cannot be
-    imported at the top of the file. The prompts module reads its few-shot files
-    by relative path at import time, so the import runs from inside the checkout.
+    Inline imports: the checkout path is a runtime flag, so lcb_runner cannot be imported at
+    the top of the file. The prompts module reads its few-shot files by relative path at
+    import time, so the import runs from inside the checkout. A missing dependency means the
+    leg was launched under an interpreter that does not carry lcb_runner's dependencies, which
+    is a setup fault worth naming, not a benchmark failure.
     """
     sys.path.insert(0, src)
     previous = os.getcwd()
@@ -95,6 +101,12 @@ def load_helpers(src: str) -> Helpers:  # pragma: no cover - needs the checkout 
         from lcb_runner.lm_styles import LMStyle
         from lcb_runner.prompts.code_generation import format_prompt_generation
         from lcb_runner.utils.extraction_utils import extract_code
+    except ImportError as exc:
+        raise CheckoutImportError(
+            f"{sys.executable} cannot import the checkout's helpers ({exc}); the leg needs an "
+            f"interpreter that carries lcb_runner's dependencies, which is what the interpreter "
+            f"field on the leg entry in legs.toml declares"
+        ) from exc
     finally:
         os.chdir(previous)
 
@@ -190,7 +202,13 @@ def run(args: LcbArgs) -> dict:
     if not problems:
         tally.notes.append(f"no problems in {args.data}")
     else:
-        run_phases(problems, args, tally, extra)
+        try:
+            run_phases(problems, args, tally, extra)
+        except CheckoutImportError as exc:
+            # Nothing ran, so the verdict is "not run" and it must not read as a model failure.
+            tally.errors.append(str(exc))
+            extra["wrong_interpreter"] = sys.executable
+            extra["reason"] = str(exc)
     return harness.finish(LEG_ID, args, tally, extra=extra)
 
 

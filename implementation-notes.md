@@ -167,3 +167,29 @@ against existing reference rows.
 - The plan sheet now names the layer that set the judge: `(standard)` when the pin supplied
   it, `(profile)` when the operator did. Before this the sheet credited every judge to the
   profile, including a judge no profile ever mentioned.
+
+## The leg that needed another interpreter (2026-11-12)
+
+The LCB leg could not run under the orchestrator at all. `lcb.load_helpers` imports
+`lcb_runner` from the checkout named by `--src`, and that package needs `datasets`, which the
+repo's own venv does not carry. `leg_command` launched every leg with `sys.executable`, so the
+leg raised `ModuleNotFoundError` before the first request. The legacy runs never saw this: they
+prepended `/mnt/data/benchmark-venv/bin` to `PATH`. A `# pragma: no cover` sat on exactly that
+import, so the gate had no opinion about it.
+
+A leg entry can now declare `interpreter`. `run_battery.leg_command` runs the leg under it and
+falls back to `sys.executable`. `legs.validate_legs` rejects a relative interpreter, because the
+orchestrator runs legs from its own working directory. The plan sheet carries an
+`interpreter:<leg>` dependency row, so the operator meets the choice with the rest of the setup.
+When the interpreter is wrong anyway, the leg writes status `not run` with the failing
+interpreter named in `reason` and `wrong_interpreter`, rather than a traceback that reads like a
+model failure: nothing about that run is the model's fault.
+
+The test is a fake checkout (five small modules) rather than a skip, so the import, the prompt
+call, the extraction fallback and the cwd restore all run in CI. `load_helpers` keeps its
+inline imports, since the checkout path is a runtime flag; it now raises `CheckoutImportError`
+instead of letting a bare `ImportError` escape.
+
+Lesson: a leg that shells out to another venv's tool is fine, but a leg that *imports* from
+another venv has to run under that venv. Say which interpreter on the leg entry, or the run
+dies at minute zero with a message that blames the wrong component.

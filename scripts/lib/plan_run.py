@@ -516,6 +516,15 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
             consequence=f"{leg.id} is scored by {leg.harness} at this commit; a harness bump "
                         f"voids the comparison with earlier runs",
             source=STANDARD))
+        if leg.interpreter:
+            decisions.append(Decision(
+                variable=f"interpreter:{leg.id}", kind=KIND_DEPENDENCY,
+                chosen=leg.interpreter, standard_value=leg.interpreter,
+                consequence=f"{leg.id} runs under {leg.interpreter} because its prompt helpers "
+                            f"import from the checkout; the orchestrator's own interpreter does "
+                            f"not carry those dependencies, so a wrong path here fails the leg "
+                            f"at minute zero",
+                source=STANDARD))
     return planned, skips, decisions
 
 

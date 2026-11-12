@@ -387,3 +387,23 @@ class SkipBlockTest(FakeRun):
         blocks = run_battery._skipped_blocks(plan, str(self.root))
         self.assertEqual(blocks["toolbench"]["reason"], "tool-eval-bench is not installed")
         self.assertIn("is missing", blocks["math500"]["reason"])
+
+
+class InterpreterTest(FakeRun):
+    """A leg that declares an interpreter runs under it; a leg that does not runs under this one."""
+
+    def math500(self, interpreter: str) -> PlannedLeg:
+        leg = replace(fixtures.BY_ID["math500"], implementation="in_repo",
+                      entry="scripts/bench_math500.py", interpreter=interpreter)
+        return PlannedLeg(leg=leg, cap=8192, ctx=131072, thinking="n/a", budget_s=0,
+                          case_timeout_s=600)
+
+    def test_a_declared_interpreter_runs_the_leg(self):
+        command = run_battery.leg_command(self.math500("/opt/other/bin/python3"), self.args(),
+                                          self.out, str(self.root), "arete-27b")
+        self.assertEqual(command[0], "/opt/other/bin/python3")
+
+    def test_a_leg_with_no_interpreter_runs_under_this_one(self):
+        command = run_battery.leg_command(self.math500(""), self.args(), self.out, str(self.root),
+                                          "arete-27b")
+        self.assertEqual(command[0], sys.executable)
