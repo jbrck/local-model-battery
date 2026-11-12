@@ -46,7 +46,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(get_dotted({"a": {"b": 1}}, "x.y", 5), 5)
 
     def test_repo_path_is_anchored_at_the_repository_root(self):
-        self.assertTrue(str(repo_path("standard.toml")).endswith("local-model-battery/standard.toml"))
+        self.assertTrue(
+            str(repo_path("standard.toml")).endswith("local-model-battery/standard.toml"))
 
     def test_sha256_prefix_is_a_truncated_digest(self):
         payload = "battery\n"

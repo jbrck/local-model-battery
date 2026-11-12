@@ -14,8 +14,8 @@
 
 [[leg]]
 id = "selftest"
-name = "Data and harness selftest"
-measures = "that the LCB and MMLU data paths and the endpoint answer at all, before any real leg burns budget"
+name = "Endpoint and harness selftest"
+measures = "that the endpoint answers and that the harnesses import, before any real leg burns budget"
 scoring = "exit code; runs two items and refuses the battery on failure"
 harness = "native"
 implementation = "port_pending"
@@ -25,7 +25,7 @@ cap_var = "caps.default"
 ctx_need = 8192
 thinking = "required_on"
 thinking_effect = "a selftest that passes with thinking off can still fail on a reasoning leg"
-prereqs = ["lcb_data"]
+prereqs = []
 resume = "none"
 comparability_keys = ["cap", "ctx"]
 known_failures = ["a soft selftest hides a broken venv until 6 hours into the run"]

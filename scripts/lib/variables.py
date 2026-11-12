@@ -105,7 +105,8 @@ def _check_variable(variable: Variable, seen: set[str], leg_ids: set[str]) -> li
     if variable.id in seen:
         problems.append(f"duplicate variable id {variable.id!r}")
     if variable.variable_class not in VARIABLE_CLASSES:
-        problems.append(f"{variable.id}: class {variable.variable_class!r} not in {VARIABLE_CLASSES}")
+        problems.append(
+            f"{variable.id}: class {variable.variable_class!r} not in {VARIABLE_CLASSES}")
     if not variable.effect:
         problems.append(f"{variable.id}: needs a measured effect or a stated absence of one")
     if not variable.decision_rule:
