@@ -115,12 +115,24 @@ class ResumeTest(LegTest):
         os.makedirs(self.out)
         partial = os.path.join(self.out, "m-lcb.partial.jsonl")
         with open(partial, "w") as handle:
+            handle.write("{not json\n")
             handle.write(json.dumps({"question_id": "q2", "code": "PASS_ME"}) + "\n")
         self.run_leg()
         self.assertEqual(len(self.stub.seen), 1)
         block = self.result()
         self.assertEqual(block["generated"], 2)
         self.assertEqual(block["scored"], 2)
+
+    def test_the_limit_flag_bounds_generation(self):
+        block = self.run_leg("--limit", "1")
+        self.assertEqual(len(self.stub.seen), 1)
+        self.assertEqual(block["generated"], 1)
+        self.assertEqual(block["ungenerated"], 0)
+
+    def test_no_guard_runs_every_problem(self):
+        block = self.run_leg("--no-guard", "--max-hours", "0")
+        self.assertEqual(len(self.stub.seen), 2)
+        self.assertNotIn("aborted", block)
 
 
 class GuardTest(LegTest):
@@ -170,6 +182,14 @@ class GuardTest(LegTest):
         decision = guard.record(FailureKind.NO_CODE, 11 * 60.0)
         self.assertTrue(decision.stop)
         self.assertIn("minutes", decision.reason)
+
+    def test_a_no_code_streak_stops_the_leg(self):
+        guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)
+        for _ in range(4):
+            self.assertFalse(guard.record(FailureKind.NO_CODE, 60.0).stop)
+        decision = guard.record(FailureKind.NO_CODE, 61.0)
+        self.assertTrue(decision.stop)
+        self.assertIn("no code", decision.reason)
 
     def test_a_failure_streak_stops_the_leg(self):
         guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)

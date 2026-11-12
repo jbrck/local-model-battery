@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import random
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -16,6 +13,15 @@ from typing import Callable
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from scripts.adapters.lcb_guard import FailureKind, Guard  # noqa: E402
+from scripts.adapters.lcb_score import score  # noqa: E402
+from scripts.adapters.lcb_store import (  # noqa: E402
+    append_record,
+    items_sha,
+    load_done,
+    load_problems,
+    partial_path,
+    write_aborted,
+)
 from scripts.lib import harness  # noqa: E402
 from scripts.lib.model import ChatResponse, ModelConfig  # noqa: E402
 
@@ -29,7 +35,6 @@ DEFAULT_STALL_MIN = 10
 DEFAULT_MAX_FAILURES = 5
 DEFAULT_WORKERS = 4
 DEFAULT_EXEC_TIMEOUT = 6
-WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcb_worker.py")
 
 
 @dataclass
@@ -79,13 +84,19 @@ def load_helpers(src: str) -> Helpers:  # pragma: no cover - needs the checkout 
     """Import the prompt and extraction helpers from the checkout named by --src.
 
     Inline imports: the checkout path is a runtime flag, so lcb_runner cannot be
-    imported at the top of the file.
+    imported at the top of the file. The prompts module reads its few-shot files
+    by relative path at import time, so the import runs from inside the checkout.
     """
     sys.path.insert(0, src)
-    from lcb_runner.benchmarks.code_generation import CodeGenerationProblem
-    from lcb_runner.lm_styles import LMStyle
-    from lcb_runner.prompts.code_generation import format_prompt_generation
-    from lcb_runner.utils.extraction_utils import extract_code
+    previous = os.getcwd()
+    os.chdir(src)
+    try:
+        from lcb_runner.benchmarks.code_generation import CodeGenerationProblem
+        from lcb_runner.lm_styles import LMStyle
+        from lcb_runner.prompts.code_generation import format_prompt_generation
+        from lcb_runner.utils.extraction_utils import extract_code
+    finally:
+        os.chdir(previous)
 
     def format_prompt(problem: dict) -> list[dict]:
         return format_prompt_generation(CodeGenerationProblem(**problem), LMStyle.OpenAIChat)
@@ -94,63 +105,6 @@ def load_helpers(src: str) -> Helpers:  # pragma: no cover - needs the checkout 
         return extract_code(content, LMStyle.OpenAIChat) or ""
 
     return Helpers(format_prompt=format_prompt, extract_code=extract)
-
-
-def load_problems(path: str, limit: int, seed: int) -> list[dict]:
-    """The dataset's problems in the legacy order: sort, seeded shuffle, limit, sort."""
-    with open(path) as handle:
-        raw = [json.loads(line) for line in handle if line.strip()]
-    raw.sort(key=lambda problem: str(problem["question_id"]))
-    random.Random(seed).shuffle(raw)
-    if limit:
-        raw = raw[:limit]
-    raw.sort(key=lambda problem: str(problem["question_id"]))
-    return raw
-
-
-def items_sha(problems: list[dict]) -> str:
-    """The comparability stamp over exactly these problems, in run order."""
-    ids = [str(problem["question_id"]) for problem in problems]
-    return hashlib.sha256(json.dumps(ids, ensure_ascii=False).encode()).hexdigest()
-
-
-def partial_path(args: LcbArgs) -> str:
-    """The resumable generation log for this model and output directory."""
-    return os.path.join(args.output_dir, f"{args.model}-lcb.partial.jsonl")
-
-
-def load_done(path: str) -> dict[str, dict]:
-    """Every generation already in the partial jsonl, keyed by question id."""
-    if not os.path.exists(path):
-        return {}
-    done: dict[str, dict] = {}
-    with open(path) as handle:
-        for line in handle:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            done[str(record.get("question_id"))] = record
-    return done
-
-
-def append_record(path: str, record: dict) -> None:
-    """Append one generation, creating the output directory on the way."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as handle:
-        handle.write(json.dumps(record) + "\n")
-
-
-def write_aborted(args: LcbArgs, reason: str, done: dict[str, dict], elapsed_s: float) -> str:
-    """Persist why generation stopped, so a truncated leg is never read as a full one."""
-    path = partial_path(args)[: -len(".partial.jsonl")] + ".aborted.json"
-    payload = {"aborted": True, "reason": reason, "model": args.model,
-               "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "elapsed_s": round(elapsed_s, 1),
-               "budget_hours": args.max_hours, "generated": len(done),
-               "with_code": sum(1 for record in done.values() if record.get("code"))}
-    with open(path, "w") as handle:
-        json.dump(payload, handle, indent=1)
-    return path
 
 
 def classify_response(qid: str, response: ChatResponse, helpers: Helpers,
@@ -193,33 +147,6 @@ def generate(problems: list[dict], helpers: Helpers, cfg: ModelConfig, args: Lcb
                 write_aborted(args, decision.reason, done, time.monotonic() - started)
                 return done, decision.reason
     return done, None
-
-
-def score(problems: list[dict], done: dict[str, dict],
-          args: LcbArgs) -> tuple[dict[str, bool], str | None]:
-    """Phase 2: run the official codegen metrics in the scorer interpreter."""
-    by_qid = {str(problem["question_id"]): problem for problem in problems}
-    scorable = [(qid, done[qid]["code"]) for qid in sorted(done)
-                if done[qid].get("code") and qid in by_qid]
-    if not scorable:
-        return {}, "no problem produced extractable code"
-    input_path = os.path.join(args.output_dir, "lcb-score-input.json")
-    output_path = os.path.join(args.output_dir, "lcb-score-output.json")
-    payload = {"problems": [by_qid[qid] for qid, _ in scorable],
-               "generations": [[code] for _, code in scorable],
-               "workers": args.workers, "exec_timeout": args.exec_timeout}
-    with open(input_path, "w") as handle:
-        json.dump(payload, handle)
-    result = subprocess.run([args.scorer_python, WORKER_SCRIPT, input_path, output_path],
-                            cwd=args.src, env={**os.environ, "PYTHONPATH": args.src})
-    if result.returncode != 0:
-        return {}, f"scorer exited {result.returncode}"
-    with open(output_path) as handle:
-        detail = json.load(handle).get("detail", {})
-    passed = {}
-    for index, (qid, _code) in enumerate(scorable):
-        passed[qid] = float(detail.get(str(index)) or 0.0) > 0.5
-    return passed, None
 
 
 def count_scored(problems: list[dict], passed: dict[str, bool], tally: harness.Tally) -> None:
@@ -271,5 +198,5 @@ def main() -> None:
     run(parse_args())
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - CLI entry
     main()

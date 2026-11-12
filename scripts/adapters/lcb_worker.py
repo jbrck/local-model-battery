@@ -43,5 +43,5 @@ def main(argv: list[str]) -> None:  # pragma: no cover - runs in the scorer subp
         json.dump(result, handle)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - subprocess entry
     main(sys.argv[1:])
