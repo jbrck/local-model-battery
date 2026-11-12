@@ -5,3 +5,6 @@ results/
 answers/
 scoring/
 .DS_Store
+.coverage
+coverage.xml
+.pytest_cache/

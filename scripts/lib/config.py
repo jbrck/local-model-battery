@@ -74,3 +74,29 @@ def sha256_prefix(path: str | Path, chars: int = HASH_PREFIX_CHARS) -> str | Non
     except OSError:
         return None
     return digest[:chars]
+
+
+def file_md5(path: str | Path) -> str:
+    """The md5 of a file, streamed so a large GGUF does not land in memory.
+
+    Empty string when the file cannot be read: the manifest treats a missing digest as a
+    mismatch, never as a pass.
+    """
+    digest = hashlib.md5()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def resolve_md5(value: str | Path | None) -> str:
+    """The md5 of a config file named by path, resolving relative paths against the repo."""
+    if not value:
+        return ""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = repo_path(str(value))
+    return file_md5(candidate)

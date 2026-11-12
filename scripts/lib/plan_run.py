@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from scripts.lib.config import get_dotted
+from scripts.lib.config import get_dotted, resolve_md5
 from scripts.lib.env_probe import HostFacts
 from scripts.lib.fit import (
     BYTES_PER_GB,
@@ -40,6 +40,9 @@ STANDARD = "standard"
 PROFILE = "profile"
 HOST = "host"
 ENGINE = "engine"
+
+# The battery's own version. Bumped when the plan schema or the planner's meaning changes.
+BATTERY_VERSION = "2.0.0"
 
 # Where each variable's standard value lives. A variable that is neither pinned here nor
 # computed by the planner has no defined value, which the plan reports as a warning.
@@ -191,6 +194,9 @@ class RunPlan:
     skips: tuple[Skip, ...] = ()
     warnings: tuple[str, ...] = ()
     stamp: dict = field(default_factory=dict)
+    standard_md5: str = ""
+    profile_path: str = ""
+    profile_md5: str = ""
 
     @property
     def needs_operator(self) -> tuple[Decision, ...]:
@@ -204,6 +210,15 @@ class RunPlan:
     def total_budget_s(self) -> int:
         return sum(leg.budget_s for leg in self.legs)
 
+    @property
+    def stamp_line(self) -> str:
+        """One line for the manifest: on the standard, or what this run moved."""
+        if not self.deviations:
+            return f"ON-STANDARD {self.standard_version}"
+        moved = ", ".join(f"{item.variable} {item.chosen} vs {item.standard_value}"
+                          for item in self.deviations)
+        return f"OFF-STANDARD {self.standard_version}: {moved}"
+
     def leg(self, leg_id: str) -> PlannedLeg | None:
         for planned in self.legs:
             if planned.id == leg_id:
@@ -212,7 +227,11 @@ class RunPlan:
 
     def to_dict(self) -> dict:
         return {
+            "battery_version": BATTERY_VERSION,
             "standard_version": self.standard_version,
+            "standard_md5": self.standard_md5,
+            "profile": {"path": self.profile_path, "md5": self.profile_md5,
+                        "model": self.model},
             "model": self.model,
             "fit": self.fit.to_dict(),
             "legs": [leg.to_dict() for leg in self.legs],
@@ -220,6 +239,8 @@ class RunPlan:
             "warnings": list(self.warnings),
             "decisions": [item.to_dict() for item in self.decisions],
             "needs_operator": [item.variable for item in self.needs_operator],
+            "deviations": [item.variable for item in self.deviations],
+            "stamp_line": self.stamp_line,
             "total_budget_s": self.total_budget_s,
             "stamp": self.stamp,
         }
@@ -378,22 +399,32 @@ def plan_ctx(standard: dict, fit: Fit, footprint: Footprint,
             source=ENGINE, needs_operator=True,
             options=(Option("serve, then read /props", "the run stamps the window the server "
                           "actually reports", recommended=True),))
-    if fit.max_ctx >= needed:
+    if fit.max_ctx >= standard_ctx:
         return standard_ctx, None
+    # The window is part of the environment a score was taken in, so a host that cannot serve the
+    # standard's window is off-standard even when every planned leg would still fit inside it.
+    fits_legs = fit.max_ctx >= needed
+    detail = (f"the standard serves {standard_ctx} tokens and this host reaches {fit.max_ctx} "
+              f"with {footprint.kv_type} KV ({fit.reason})")
+    if fits_legs:
+        detail += (f"; every planned leg needs at most {needed}, so they still run whole, but "
+                   f"the numbers do not compare with a full-window run")
+    else:
+        detail += (f"; the largest planned leg needs {needed}, so caps are clamped to keep the "
+                   f"prompt inside the window")
     options = (
         Option(f"run at {fit.max_ctx} tokens",
-               f"every leg that needs {needed} or less still fits; stamp ctx={fit.max_ctx}, "
-               f"off-standard", recommended=True),
+               f"stamp ctx={fit.max_ctx}, off-standard; keep it for every run on this shape of "
+               f"host so at least those numbers compare with each other", recommended=True),
         Option("keep the standard window and spill to RAM",
-               "the window survives, throughput drops badly on a model this size"),
+               f"the window survives and the stamp stays on-standard, at the cost of throughput: "
+               f"{needed} tokens of prompt plus KV on a {fit.vram_free_gb:.0f} GB card"),
         Option("quantise the KV cache further",
                "buys window at the cost of KV numerics; stamp kv_type, off-standard"),
     )
     return fit.max_ctx, Decision(
         variable="ctx", kind=KIND_MEASUREMENT, chosen=str(fit.max_ctx),
-        standard_value=str(standard_ctx),
-        consequence=f"the standard asks for {standard_ctx} tokens and this host reaches "
-                    f"{fit.max_ctx} with {footprint.kv_type} KV: {fit.reason}",
+        standard_value=str(standard_ctx), consequence=detail,
         source=HOST, options=options, needs_operator=True)
 
 
@@ -724,7 +755,9 @@ def plan_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
 
 def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile: dict,
              host: HostFacts, server: ServerFacts, pilot: PilotResult,
-             judge: Judge | None = None, selected: tuple[str, ...] = ()) -> RunPlan:
+             judge: Judge | None = None, selected: tuple[str, ...] = (),
+             standard_path: str = "standard.toml",
+             profile_path: str = "") -> RunPlan:
     """Build the plan: fit, window, per-leg caps, decisions, warnings and the stamp."""
     chosen = [leg for leg in legs if not selected or leg.id in selected]
     fit, footprint = compute_plan_fit(profile, standard, host)
@@ -749,4 +782,7 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
         fit=fit, legs=tuple(planned), decisions=tuple(decisions), skips=tuple(skips),
         warnings=tuple(plan_warnings(inputs, decisions)),
         stamp=build_stamp(variables, decisions),
+        standard_md5=resolve_md5(standard_path),
+        profile_path=profile_path,
+        profile_md5=resolve_md5(profile_path),
     )
