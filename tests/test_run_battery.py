@@ -1,0 +1,332 @@
+"""The orchestrator's own behaviour: what it refuses to run, and what it does with a leg.
+
+The legs are faked here. A leg is whatever a script prints and writes, so a three-line
+script is enough to exercise every path the orchestrator has: a clean pass, a leg that
+exits without a block, one that hangs past its budget, and one that already passed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+import sys
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts import run_battery  # noqa: E402
+from scripts.lib.plan_run import PlannedLeg, Skip  # noqa: E402
+from tests import fixtures  # noqa: E402
+
+PASS = ("import json, os, sys\n"
+        "out = os.path.join(sys.argv[sys.argv.index('--output-dir') + 1], 'math500.result.json')\n"
+        "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
+        "json.dump({'leg': 'math500', 'status': 'pass', 'items': 500, 'scored': 500,\n"
+        "           'correct': 421, 'score_pct': 84.2, 'tps': 27.5, 'cap_hits': 0,\n"
+        "           'runaway': 0, 'timeout_hits': 0}, open(out, 'w'))\n"
+        "print('@@RESULT ' + json.dumps({'leg': 'math500', 'status': 'pass'}))\n")
+HANG = "import time\ntime.sleep(30)\n"
+CRASH = "import sys\nsys.exit(3)\n"
+
+
+def write_script(root: Path, relative: str, body: str) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+class FakeRun(unittest.TestCase):
+    """A throwaway repo shape: one leg script, its data file, and somewhere to write."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.out = self.root / "run"
+        self.data = self.root / "data"
+        self.data.mkdir(parents=True, exist_ok=True)
+        (self.data / "math500.json").write_text("[]")
+
+    def planned(self, leg_id: str = "math500", **changes) -> PlannedLeg:
+        leg = replace(fixtures.BY_ID[leg_id], implementation="in_repo",
+                      entry="scripts/bench_math500.py", data="data/math500.json")
+        planned = PlannedLeg(leg=leg, cap=8192, ctx=131072, thinking="on", budget_s=60,
+                             case_timeout_s=900)
+        return replace(planned, **changes)
+
+    def args(self, **changes) -> argparse.Namespace:
+        base = dict(model="arete-27b", profile="profiles/example.toml",
+                    endpoint="http://127.0.0.1:11434/v1", api_key="not-needed",
+                    out=str(self.out), resume=False, no_budget_kill=False)
+        base.update(changes)
+        return argparse.Namespace(**base)
+
+
+class MissingReasonTest(FakeRun):
+    def test_a_leg_that_is_not_port_yet_says_so(self):
+        leg = replace(fixtures.BY_ID["toolbench"], implementation="port_pending")
+        planned = PlannedLeg(leg=leg, cap=8192, ctx=131072, thinking="on", budget_s=60)
+        self.assertIn("not in this repo yet", run_battery.missing_reason(planned, str(self.root)))
+
+    def test_a_leg_whose_script_is_absent_is_not_run(self):
+        planned = self.planned()
+        self.assertIn("scripts/bench_math500.py is missing",
+                      run_battery.missing_reason(planned, str(self.root)))
+
+    def test_a_leg_whose_items_are_absent_is_not_run(self):
+        write_script(self.root, "scripts/bench_math500.py", PASS)
+        (self.data / "math500.json").unlink()
+        self.assertIn("data/math500.json is missing",
+                      run_battery.missing_reason(self.planned(), str(self.root)))
+
+    def test_a_leg_with_everything_gets_an_empty_reason(self):
+        write_script(self.root, "scripts/bench_math500.py", PASS)
+        self.assertEqual("", run_battery.missing_reason(self.planned(), str(self.root)))
+
+
+class LegCommandTest(FakeRun):
+    def test_the_command_carries_every_knob_the_plan_decided(self):
+        command = run_battery.leg_command(self.planned(), self.args(), self.out,
+                                          str(self.root), "arete-27b")
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1], str(self.root / "scripts/bench_math500.py"))
+        for flag, value in (("--model", "arete-27b"), ("--cap", "8192"), ("--ctx", "131072"),
+                            ("--thinking", "on"), ("--timeout", "900"),
+                            ("--data", str(self.root / "data/math500.json")),
+                            ("--output-dir", str(self.out / "legs"))):
+            self.assertEqual(command[command.index(flag) + 1], value, flag)
+
+    def test_a_leg_with_its_own_flags_gets_them_appended(self):
+        planned = self.planned(extra_args=("--workers", "1"))
+        command = run_battery.leg_command(planned, self.args(), self.out, str(self.root), "m")
+        self.assertEqual(command[-2:], ["--workers", "1"])
+
+    def test_a_leg_that_brings_its_own_data_gets_no_data_flag(self):
+        planned = self.planned()
+        planned = replace(planned, leg=replace(planned.leg, data=""))
+        command = run_battery.leg_command(planned, self.args(), self.out, str(self.root), "m")
+        self.assertNotIn("--data", command)
+
+
+class ReadBlockTest(FakeRun):
+    def _write(self, text: str) -> None:
+        (self.out / "legs").mkdir(parents=True, exist_ok=True)
+        (self.out / "legs" / "math500.result.json").write_text(text)
+
+    def test_no_block_is_none(self):
+        self.assertIsNone(run_battery.read_block(self.out, "math500"))
+
+    def test_a_truncated_block_is_none(self):
+        self._write('{"leg": "math500"')
+        self.assertIsNone(run_battery.read_block(self.out, "math500"))
+
+    def test_a_written_block_comes_back(self):
+        self._write('{"leg": "math500", "status": "pass"}')
+        self.assertEqual(run_battery.read_block(self.out, "math500")["status"], "pass")
+
+    def test_done_only_counts_a_pass(self):
+        self._write('{"leg": "math500", "status": "fail"}')
+        self.assertFalse(run_battery.done(self.out, "math500"))
+        self._write('{"leg": "math500", "status": "pass"}')
+        self.assertTrue(run_battery.done(self.out, "math500"))
+
+
+class RunLegTest(FakeRun):
+    def test_a_passing_leg_is_reported_from_its_own_block(self):
+        write_script(self.root, "scripts/bench_math500.py", PASS)
+        block = run_battery.run_leg(self.planned(), self.args(), self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "pass")
+        self.assertEqual(block["correct"], 421)
+        self.assertEqual(block["exit_code"], 0)
+        self.assertTrue(Path(block["log"]).is_file())
+
+    def test_a_leg_that_exits_without_writing_a_block_is_a_failure(self):
+        write_script(self.root, "scripts/bench_math500.py", CRASH)
+        block = run_battery.run_leg(self.planned(), self.args(), self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "fail")
+        self.assertEqual(block["exit_code"], 3)
+        self.assertIn("no result block", block["reason"])
+
+    def test_a_leg_that_overruns_its_budget_is_stopped_and_says_so(self):
+        write_script(self.root, "scripts/bench_math500.py", HANG)
+        planned = self.planned(budget_s=1)
+        block = run_battery.run_leg(planned, self.args(), self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "timeout")
+        self.assertIn("planned budget", block["reason"])
+
+    def test_the_budget_kill_can_be_turned_off(self):
+        write_script(self.root, "scripts/bench_math500.py", PASS)
+        planned = self.planned(budget_s=0)
+        args = self.args(no_budget_kill=True)
+        self.assertEqual("pass",
+                         run_battery.run_leg(planned, args, self.out, str(self.root), "m")["status"])
+
+
+class RunAllTest(FakeRun):
+    def _plan(self, selected, gate_id: str = "selftest"):
+        """A plan whose legs are the fakes in this directory."""
+        plan = fixtures.plan(fixtures.FITS, selected=selected)
+        legs = []
+        for planned in plan.legs:
+            if planned.leg.id in ("math500", "selftest"):
+                leg = replace(planned.leg, implementation="in_repo",
+                              entry=f"scripts/bench_{planned.leg.id}.py",
+                              data="data/math500.json")
+            else:
+                leg = planned.leg
+            legs.append(replace(planned, leg=leg, budget_s=2 if leg.id == gate_id else 60))
+        return replace(plan, legs=tuple(legs), skips=())
+
+    def test_a_missing_leg_is_recorded_rather_than_scored_zero(self):
+        plan = self._plan(("math500",))
+        results = run_battery.run_all(plan, self.args(no_budget_kill=True), self.out, str(self.root))
+        self.assertEqual(results["math500"]["status"], "not run")
+        self.assertIn("is missing", results["math500"]["reason"])
+
+    def test_the_gate_stops_the_run_when_it_fails(self):
+        write_script(self.root, "scripts/bench_selftest.py", CRASH)
+        write_script(self.root, "scripts/bench_math500.py", PASS)
+        plan = self._plan(("selftest", "math500"))
+        results = run_battery.run_all(plan, self.args(), self.out, str(self.root))
+        self.assertEqual(results["selftest"]["status"], "fail")
+        self.assertNotIn("math500", results,
+                         "the gate leg failed and the run should have stopped")
+
+    def test_a_leg_that_already_passed_is_left_alone_on_resume(self):
+        write_script(self.root, "scripts/bench_math500.py", CRASH)
+        (self.out / "legs").mkdir(parents=True, exist_ok=True)
+        (self.out / "legs" / "math500.result.json").write_text(
+            json.dumps({"leg": "math500", "status": "pass", "correct": 421}))
+        plan = self._plan(("math500",))
+        results = run_battery.run_all(plan, self.args(resume=True), self.out, str(self.root))
+        self.assertEqual(results["math500"]["correct"], 421)
+
+
+class ReportTest(FakeRun):
+    def test_the_summary_names_every_leg_and_the_stamp(self):
+        plan = fixtures.plan(fixtures.FITS, selected=fixtures.FREE)
+        results = {"math500": {"status": "pass", "correct": 421, "scored": 500, "score_pct": 84.2},
+                   "mmlu": {"status": "not run", "reason": "data/mmlu_test.json is missing"}}
+        text = run_battery.summarise(plan, results)
+        self.assertIn("Stamp:", text)
+        self.assertIn("math500", text)
+        self.assertIn("not run", text)
+
+    def test_a_failed_leg_makes_the_run_non_zero(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        self.assertEqual(1, run_battery.verdict(plan, {"math500": {"status": "fail"}}, strict=False))
+        self.assertEqual(0, run_battery.verdict(plan, {"math500": {"status": "pass"}}, strict=False))
+
+    def test_a_leg_that_never_ran_only_fails_a_strict_run(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        results = {"math500": {"status": "not run", "reason": "missing"}}
+        self.assertEqual(0, run_battery.verdict(plan, results, strict=False))
+        self.assertEqual(1, run_battery.verdict(plan, results, strict=True))
+
+    def test_skips_are_listed_as_skipped_legs(self):
+        # The pair of 3080s has nothing installed, so the adapter legs cannot run there.
+        plan = fixtures.plan(fixtures.FITS, host=fixtures.PAIR, selected=("toolbench",))
+        block = run_battery._skipped_blocks(plan, str(self.root))
+        self.assertTrue(plan.skips, "this host should have skipped toolbench")
+        self.assertEqual(block[plan.skips[0].leg]["status"], "not run")
+
+
+class MainTest(FakeRun):
+    def _patched(self, plan, host=None, server=None):
+        fixture = (plan, host or fixtures.RICH, server or fixtures.SERVER, fixtures.PILOT)
+        return mock.patch.object(run_battery, "probe_from_args", return_value=fixture)
+
+    def test_a_dry_run_plans_and_starts_nothing(self):
+        plan = fixtures.plan(fixtures.FITS, selected=fixtures.FREE)
+        with self._patched(plan):
+            code = run_battery.main(["--profile", "profiles/example.toml", "--dry-run",
+                                     "--legs", "math500,mmlu"])
+        self.assertEqual(code, 0)
+        self.assertFalse(self.out.exists())
+
+    def test_a_real_run_needs_a_directory(self):
+        plan = fixtures.plan(fixtures.FITS, selected=fixtures.FREE)
+        with self._patched(plan):
+            code = run_battery.main(["--profile", "profiles/example.toml", "--skip-preflight"])
+        self.assertEqual(code, 2)
+
+    def test_a_run_with_nothing_runnable_still_writes_its_account(self):
+        plan = fixtures.plan(fixtures.FITS, selected=fixtures.FREE)
+        args = self.args(skip_preflight=True)
+        with self._patched(plan), mock.patch.object(run_battery, "missing_reason",
+                                                    return_value="script is missing"):
+            code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                     "--skip-preflight", "--legs", "math500,mmlu"])
+        self.assertEqual(code, 0)
+        self.assertTrue((self.out / "MANIFEST.json").is_file())
+        self.assertIn("not run", (self.out / "NOTES.md").read_text())
+        del args
+
+    def test_a_blocking_preflight_stops_before_any_leg(self):
+        plan = fixtures.plan(fixtures.FITS, selected=fixtures.FREE)
+        blocked = [SimpleNamespace(name="host:fits", blocks=True, ok=False)]
+        with self._patched(plan), mock.patch.object(run_battery.preflight, "run_preflight",
+                                                    return_value=blocked), \
+                mock.patch.object(run_battery.preflight, "write_preflight"), \
+                mock.patch.object(run_battery.preflight, "summarise", return_value="blocked"), \
+                mock.patch.object(run_battery.preflight, "blocked", return_value=blocked), \
+                mock.patch.object(run_battery, "run_all") as run_all:
+            code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                     "--legs", "math500,mmlu"])
+        self.assertEqual(code, 1)
+        run_all.assert_not_called()
+
+    def test_skipping_the_gate_says_so_and_still_runs(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        with self._patched(plan), mock.patch.object(run_battery, "missing_reason",
+                                                    return_value="script is missing"):
+            code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                     "--skip-preflight", "--legs", "math500"])
+        self.assertEqual(code, 0)
+        self.assertTrue((self.out / "MANIFEST.json").is_file())
+
+
+class LoadPlanTest(FakeRun):
+    """Reusing a plan keeps its settings; the host is still probed for the manifest."""
+
+    def _write_plan(self, plan) -> Path:
+        path = self.out / "run-plan.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(plan.to_dict()))
+        return path
+
+    def test_a_reused_plan_is_not_re_planned(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        path = self._write_plan(plan)
+        with mock.patch("scripts.lib.env_probe.probe_host", return_value=fixtures.RICH) as probe:
+            loaded, host, server, pilot = run_battery.load_plan(self.args(plan=str(path)))
+        self.assertEqual([item.leg.id for item in loaded.legs],
+                         [item.leg.id for item in plan.legs])
+        self.assertEqual(loaded.legs[0].cap, plan.legs[0].cap)
+        self.assertIs(host, fixtures.RICH)
+        probe.assert_called_once()
+        self.assertIsNone(server)
+        self.assertIsNone(pilot)
+
+    def test_a_reused_plan_keeps_its_case_timeout(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        plan = replace(plan, legs=(replace(plan.legs[0], case_timeout_s=1234),))
+        loaded, _, _, _ = run_battery.load_plan(self.args(plan=str(self._write_plan(plan))))
+        self.assertEqual(loaded.legs[0].case_timeout_s, 1234)
+
+
+class SkipBlockTest(FakeRun):
+    def test_a_skip_and_a_missing_script_both_get_a_block(self):
+        plan = fixtures.plan(fixtures.FITS, selected=("math500",))
+        plan = replace(plan, skips=(Skip("toolbench", "tool-eval-bench is not installed"),))
+        blocks = run_battery._skipped_blocks(plan, str(self.root))
+        self.assertEqual(blocks["toolbench"]["reason"], "tool-eval-bench is not installed")
+        self.assertIn("is missing", blocks["math500"]["reason"])

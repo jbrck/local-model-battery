@@ -1,0 +1,19 @@
+# Template profile: a 27B q4_k_m on one 24GB card.
+#
+# Numbers here describe the MODEL, not the run. Caps, thinking settings and seeds live in
+# standard.toml and are the same for every model and every host. See README.md in this
+# directory for where each number comes from.
+
+id = "example-27b-q4km"
+
+# Size of the GGUF on disk. `du -b model.gguf` then divide by 1073741824.
+weights_gb = 16.4
+quant = "Q4_K_M"
+
+[model]
+# From llama.cpp GET /props once the model is served, or from the GGUF metadata.
+n_layers = 64
+n_kv_heads = 8
+head_dim = 128
+# The cache type the serve actually uses. Leave it out to inherit standard.toml serve.kv_k.
+kv_type = "q8_0"

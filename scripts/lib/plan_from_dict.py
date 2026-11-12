@@ -49,7 +49,9 @@ def _plan_leg(payload: dict, catalog: dict[str, Leg]) -> PlannedLeg:
         raise KeyError(f"leg {payload['id']!r} is not in the catalog")
     return PlannedLeg(leg=leg, cap=payload["cap"], ctx=payload["ctx"],
                       thinking=payload["thinking"], budget_s=payload["budget_s"],
+                      case_timeout_s=int(payload.get("case_timeout_s", 0)),
                       dependencies=_dependencies(payload.get("dependencies", [])),
+                      extra_args=tuple(payload.get("extra_args", [])),
                       note=payload.get("note", ""))
 
 

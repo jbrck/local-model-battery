@@ -96,7 +96,7 @@ def config_fingerprint(plan: RunPlan) -> dict:
     }
 
 
-def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts) -> dict:
+def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts | None) -> dict:
     """Everything needed to say later exactly what this run was."""
     config = config_fingerprint(plan)
     return {
@@ -111,7 +111,7 @@ def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts) -> dict:
         "plan_md5": _digest(plan.to_dict()),
         "harness_md5": harness_digests(plan),
         "serve_cmdline": str(plan.to_dict().get("serve_cmdline") or "") or _serve_hint(server),
-        "props": server.props if isinstance(server.props, dict) else {},
+        "props": server.props if server and isinstance(server.props, dict) else {},
         "env": env_snapshot(),
         "host": {
             "gpus": [gpu.to_dict() for gpu in host.gpus],
@@ -126,15 +126,16 @@ def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts) -> dict:
     }
 
 
-def _serve_hint(server: ServerFacts) -> str:
+def _serve_hint(server: ServerFacts | None) -> str:
     """The endpoint's own report of how it was started, when there is one."""
-    model_path = (server.props or {}).get("model_path") if isinstance(server.props, dict) else None
+    props = getattr(server, "props", None)
+    model_path = props.get("model_path") if isinstance(props, dict) else None
     if model_path:
         return f"served from {model_path} (n_ctx {server.ctx}, {server.slots} slots)"
     return "not reported by the endpoint"
 
 
-def start(out_dir: Path, plan: RunPlan, host: HostFacts, server: ServerFacts,
+def start(out_dir: Path, plan: RunPlan, host: HostFacts, server: ServerFacts | None,
           resume: bool = False, manifest: dict | None = None) -> Path:
     """Write MANIFEST.json, refusing to continue a directory whose configuration moved."""
     out_dir.mkdir(parents=True, exist_ok=True)

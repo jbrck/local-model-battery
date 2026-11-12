@@ -45,7 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def plan_from_args(args: argparse.Namespace):
+def probe_from_args(args: argparse.Namespace):
+    """Plan the run and hand back the raw probes the plan was built from.
+
+    The orchestrator needs the same host, endpoint and pilot the plan saw: the gate re-checks
+    them and the manifest records them.
+    """
     standard = load_toml(STANDARD_FILE)
     legs = load_legs(standard)
     variables = load_variables()
@@ -59,7 +64,12 @@ def plan_from_args(args: argparse.Namespace):
     judge = Judge(model=args.judge_model or None, endpoint=args.judge_endpoint or None,
                   under_test=cfg.name)
     selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
-    return plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected)
+    plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected)
+    return plan, host, server, pilot
+
+
+def plan_from_args(args: argparse.Namespace):
+    return probe_from_args(args)[0]
 
 
 def _unprobed_server(cfg: ModelConfig):

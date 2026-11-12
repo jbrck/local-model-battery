@@ -54,6 +54,7 @@ class Leg:
     gate: bool = False
     items: int = 0
     budget_floor: int = 0
+    data: str = ""
 
     @property
     def implemented(self) -> bool:
@@ -70,7 +71,7 @@ class Leg:
             "prereqs": list(self.prereqs), "resume": self.resume,
             "comparability_keys": list(self.comparability_keys),
             "known_failures": list(self.known_failures), "gate": self.gate,
-            "items": self.items, "budget_floor": self.budget_floor,
+            "items": self.items, "budget_floor": self.budget_floor, "data": self.data,
         }
 
 
@@ -100,6 +101,7 @@ def load_legs(standard: dict, path: str = LEGS_FILE) -> list[Leg]:
             gate=bool(raw.get("gate", False)),
             items=int(items.get(leg_id, 0)),
             budget_floor=int(floors.get(leg_id, 0)),
+            data=str(raw.get("data", "")),
         ))
     return legs
 

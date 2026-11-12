@@ -162,7 +162,9 @@ class PlannedLeg:
     ctx: int
     thinking: str
     budget_s: int
+    case_timeout_s: int = 0
     dependencies: tuple[Dependency, ...] = ()
+    extra_args: tuple[str, ...] = ()
     note: str = ""
 
     @property
@@ -178,6 +180,7 @@ class PlannedLeg:
             "id": self.leg.id, "name": self.leg.name, "cap": self.cap, "ctx": self.ctx,
             "thinking": self.thinking, "budget_s": self.budget_s, "note": self.note,
             "gate": self.leg.gate, "items": self.leg.items,
+            "case_timeout_s": self.case_timeout_s, "extra_args": list(self.extra_args),
             "dependencies": [item.to_dict() for item in self.dependencies],
         }
 
@@ -254,36 +257,65 @@ class RunPlan:
             f"legs     {len(self.legs)} runnable, {len(self.skips)} skipped, "
             f"{_hours(self.total_budget_s)} of worst-case budget",
         ]
-        if self.deviations:
-            lines.append("off-standard: " + ", ".join(
-                f"{item.variable}={item.chosen}" for item in self.deviations))
+        lines += self._deviation_lines()
         if self.skips:
             lines.append("")
             lines.append("Skipped")
-            lines.extend(f"  - {skip.leg}: {skip.reason}" for skip in self.skips)
-        pending = self.needs_operator
-        if pending:
-            lines.append("")
-            lines.append(f"Decisions that need you ({len(pending)})")
-            for index, item in enumerate(pending, start=1):
-                lines.append(f"  [{index}] {item.variable} ({item.kind}) -- {_state(item)}")
-                lines.append(f"      {item.consequence}")
-                for option in item.options:
-                    mark = "*" if option.recommended else " "
-                    lines.append(f"      {mark} {option.label}: {option.consequence}")
+            lines += self._skipped_lines()
+        lines += _pending_block(self.needs_operator)
+        lines += _fixed_block(tuple(item for item in self.decisions if not item.needs_operator))
         lines.append("")
         lines.append("Legs")
-        lines.extend(
-            f"  {planned.id:<16} cap {planned.cap:<7} ctx {planned.ctx:<7} "
-            f"think {planned.thinking:<6} {_hours(planned.budget_s)}"
-            + (f"  {planned.note}" if planned.note else "")
-            for planned in self.legs
-        )
+        lines += [_leg_line(planned) for planned in self.legs]
         if self.warnings:
             lines.append("")
             lines.append("Warnings")
-            lines.extend(f"  ! {warning}" for warning in self.warnings)
+            lines += [f"  ! {warning}" for warning in self.warnings]
         return "\n".join(lines)
+
+    def _deviation_lines(self) -> list[str]:
+        if not self.deviations:
+            return []
+        moved = ", ".join(f"{item.variable}={item.chosen}" for item in self.deviations)
+        return ["off-standard: " + moved]
+
+    def _skipped_lines(self) -> list[str]:
+        return [f"  - {skip.leg}: {skip.reason}" for skip in self.skips]
+
+
+def _leg_line(planned: PlannedLeg) -> str:
+    line = (f"  {planned.id:<16} cap {planned.cap:<7} ctx {planned.ctx:<7} "
+            f"think {planned.thinking:<6} {_hours(planned.budget_s)}")
+    return line + (f"  {planned.note}" if planned.note else "")
+
+
+def _pending_block(pending: tuple[Decision, ...]) -> list[str]:
+    """The decisions the operator has to make here, with what rides on each one."""
+    if not pending:
+        return []
+    lines = ["", f"Decisions that need you ({len(pending)})"]
+    for index, item in enumerate(pending, start=1):
+        lines.append(f"  [{index}] {item.variable} ({item.kind}) -- {_state(item)}")
+        lines.append(f"      {item.consequence}")
+        for option in item.options:
+            mark = "*" if option.recommended else " "
+            lines.append(f"      {mark} {option.label}: {option.consequence}")
+    return lines
+
+
+def _fixed_block(fixed: tuple[Decision, ...]) -> list[str]:
+    """Every other setting, so the operator can see what was assumed in the standard's name."""
+    if not fixed:
+        return []
+    lines = ["", f"Set by the standard here ({len(fixed)}) -- "
+                 "these are what make this run comparable"]
+    lines += [f"  {_fixed_line(item)}" for item in fixed]
+    return lines
+
+
+def _fixed_line(item: Decision) -> str:
+    """One compact row for a decision the standard already answered on this host."""
+    return (f"{item.variable} = {item.chosen} ({item.source}) -- {item.consequence}")
 
 
 def _state(item: Decision) -> str:
@@ -456,6 +488,7 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
         mode, note = resolve_thinking(leg, thinking_request, server)
         planned.append(PlannedLeg(leg=leg, cap=cap, ctx=ctx, thinking=mode,
                                   budget_s=budget_seconds(leg, cap, pilot, standard),
+                                  case_timeout_s=pilot.case_timeout_s(cap),
                                   dependencies=dependencies, note=note))
         clamped = cap != standard_cap
         options: tuple[Option, ...] = ()

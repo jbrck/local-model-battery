@@ -1,155 +1,293 @@
 #!/usr/bin/env python3
-"""Local Model Battery orchestrator.
+"""Run the battery on one model: probe, plan, gate, run every leg, write the manifest.
 
-Runs the mechanically scored benchmarks in order, then optionally generates
-writing-suite answers. Writing answers are scored blind in a separate step.
+One command, one run directory. The directory ends up holding:
+
+    PREFLIGHT.json   what the gate checked and what it refused to pass
+    run-plan.json    the plan the run was held to
+    MANIFEST.json    the standard, the profile, the host and the serve, all fingerprinted
+    legs/*.result.json   one block per leg, with the counters the standard compares
+    logs/*.log       the leg's own stdout, kept so a weird score can be read back
+    NOTES.md         the run's account of itself, ending in the comparability stamp
+
+    python3 scripts/run_battery.py --model arete-27b \
+        --profile profiles/arete-27b.toml --out runs/arete-27b
+
+Legs run one at a time: the box serves one model, so overlapping legs would just fight
+for the same GPU and make tps meaningless. Each leg gets the cap, window, thinking setting
+and case timeout the plan decided, and a wall-clock limit off the pilot's measured speed.
 """
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import subprocess
 import sys
-import time
+from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from scripts.lib.model import verify_endpoint  # noqa: E402
+from scripts.lib.config import load_toml  # noqa: E402
+from scripts.lib.harness import RESULT_SUFFIX  # noqa: E402
+from scripts.lib.legs import load_legs  # noqa: E402
+from scripts.lib.plan_run import RunPlan  # noqa: E402
+from scripts.plan_run import probe_from_args  # noqa: E402
+from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
 from scripts.lib.reporting import elapsed, start_timer  # noqa: E402
+from scripts import manifest  # noqa: E402
+from scripts import preflight  # noqa: E402
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-MECHANICAL_BENCHES = ("math500", "humaneval_plus", "gpqa_diamond", "instr_v2")
-HEADLINE_KEYS = ("accuracy_pct", "pass_at_1_pct", "score_pct", "score", "n_passed")
-
-
-def run_bench(script: str, model: str, endpoint: str, output_dir: str,
-              extra: list[str] | None = None) -> dict:
-    """Run one benchmark script as a subprocess and report its exit status."""
-    command = [sys.executable, script, "--model", model, "--endpoint", endpoint,
-               "--output-dir", output_dir]
-    if extra:
-        command.extend(extra)
-
-    print(f"\n{'=' * 50}\nRunning: {script}\n{'=' * 50}")
-    sys.stdout.flush()
-    result = subprocess.run(command, check=False)
-    return {"script": script, "exit_code": result.returncode,
-            "completed": result.returncode == 0}
+STANDARD_FILE = "standard.toml"
+LEGS_DIR = "legs"
+LOG_DIR = "logs"
+PENDING_STATUS = "not run"
+FAILED_STATUSES = ("fail", "timeout")
 
 
-def find_latest_result(bench_name: str, model: str, output_dir: str) -> dict | None:
-    """Find the newest saved result for a benchmark."""
-    safe_model = model.replace("/", "--").replace(" ", "-")
-    pattern = os.path.join(output_dir, f"{bench_name}-{safe_model}-*.json")
-    files = sorted(glob.glob(pattern))
-    if not files:
-        return None
-    with open(files[-1]) as handle:
-        return json.load(handle)
-
-
-def headline_of(result: dict) -> dict:
-    """Pull the headline metrics out of a benchmark result."""
-    return {key: result[key] for key in HEADLINE_KEYS if key in result}
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the local model battery")
-    parser.add_argument("--model", required=True, help="Model alias on the endpoint")
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model", default="", help="served model name (defaults to profile id)")
+    parser.add_argument("--profile", required=True, help="model profile TOML")
+    parser.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--api-key", default="not-needed")
-    parser.add_argument("--output-dir", default="results")
-    parser.add_argument("--skip", action="append", default=None,
-                        help="Skip a benchmark (repeatable): "
-                             + ", ".join(MECHANICAL_BENCHES))
-    parser.add_argument("--writing", action="store_true",
-                        help="Also generate writing-suite answers (generation only)")
-    parser.add_argument("--writing-suite", default="data/writing_suite_v1.json")
-    parser.add_argument("--answers-dir", default="answers")
-    parser.add_argument("--smoke-only", action="store_true", help="Smoke test only")
-    parser.add_argument("--smoke-limit", type=int, default=10,
-                        help="Problems per benchmark in smoke mode (default: 10)")
-    args = parser.parse_args()
+    parser.add_argument("--out", default="",
+                        help="run directory (created if missing; not needed with --dry-run)")
+    parser.add_argument("--legs", default="", help="comma-separated subset of leg ids")
+    parser.add_argument("--judge-model", default="", help="scoring model for the writing leg")
+    parser.add_argument("--judge-endpoint", default="", help="judge base URL")
+    parser.add_argument("--plan", default="", help="reuse a run-plan.json instead of probing")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan and stop")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="run without the gate (the manifest records that it was skipped)")
+    parser.add_argument("--no-probe", action="store_true", help="plan without touching the box")
+    parser.add_argument("--resume", action="store_true",
+                        help="continue a run directory: legs that passed are left alone")
+    parser.add_argument("--no-budget-kill", action="store_true",
+                        help="do not stop a leg that overruns its planned budget")
+    parser.add_argument("--strict", action="store_true",
+                        help="exit non-zero when a leg is missing or was never planned")
+    parser.add_argument("--json", action="store_true", help="print the summary as JSON")
+    return parser
 
-    skipped = set(args.skip or [])
-    unknown = skipped - set(MECHANICAL_BENCHES)
-    if unknown:
-        print(f"ERROR: unknown --skip value(s): {sorted(unknown)}", file=sys.stderr)
-        return 1
 
-    os.makedirs(args.output_dir, exist_ok=True)
+def load_plan(args: argparse.Namespace) -> tuple[RunPlan, Any, Any, Any]:
+    """Either reuse the plan in the run directory, or probe the box and build one.
+
+    A reused plan is taken as written: the legs and the settings do not get re-planned. The
+    host is still probed, because the manifest has to record the box the run actually happened on.
+    """
+    if not args.plan:
+        return probe_from_args(args)
+    payload = json.loads(Path(args.plan).read_text())
+    plan = plan_from_dict(payload, load_legs(load_toml(STANDARD_FILE)))
+    print(f"reusing the plan in {args.plan}: leg settings are taken as written")
+    from scripts.lib.env_probe import probe_host
+    return plan, probe_host(), None, None
+
+
+def _entry_path(plan_root: str, planned) -> Path:
+    return Path(plan_root) / planned.leg.entry
+
+
+def missing_reason(planned, root: str) -> str:
+    """Why this leg cannot run here, or an empty string when it can."""
+    if not planned.leg.implemented:
+        return f"the entry script is not in this repo yet ({planned.leg.entry})"
+    entry = _entry_path(root, planned)
+    if not entry.is_file():
+        return f"{planned.leg.entry} is missing"
+    if planned.leg.data and not (Path(root) / planned.leg.data).is_file():
+        return f"{planned.leg.data} is missing"
+    return ""
+
+
+def _skipped_blocks(plan: RunPlan, root: str) -> dict:
+    """A block for every leg that will not run, so the run directory explains itself."""
+    blocks = {}
+    for skip in plan.skips:
+        blocks[skip.leg] = {"leg": skip.leg, "status": PENDING_STATUS, "reason": skip.reason}
+    for planned in plan.legs:
+        reason = missing_reason(planned, root)
+        if reason:
+            blocks[planned.leg.id] = {"leg": planned.leg.id, "status": PENDING_STATUS,
+                                      "reason": reason}
+    return blocks
+
+
+def leg_command(planned, args: argparse.Namespace, out_dir: Path, root: str,
+                model: str) -> list[str]:
+    """The exact command line one leg runs under: every knob the plan decided shows up here."""
+    entry = _entry_path(root, planned)
+    command = [sys.executable, str(entry),
+               "--model", model,
+               "--endpoint", args.endpoint, "--api-key", args.api_key,
+               "--output-dir", str(out_dir / LEGS_DIR),
+               "--cap", str(planned.cap), "--ctx", str(planned.ctx),
+               "--thinking", planned.thinking,
+               "--timeout", str(planned.case_timeout_s)]
+    if planned.leg.data:
+        command += ["--data", str(Path(root) / planned.leg.data)]
+    command += list(planned.extra_args)
+    return command
+
+
+def read_block(out_dir: Path, leg_id: str) -> dict | None:
+    """The leg's own result block, which is the only thing the orchestrator trusts."""
+    path = out_dir / LEGS_DIR / f"{leg_id}{RESULT_SUFFIX}"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: str) -> dict:
+    """Run one leg and report what happened, including a leg that had to be stopped."""
+    log_dir = out_dir / LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{planned.leg.id}.log"
+    command = leg_command(planned, args, out_dir, root, model)
+    limit = None if args.no_budget_kill else planned.budget_s or None
+    print(f"\n{'=' * 60}\n{planned.leg.id}: cap {planned.cap}, ctx {planned.ctx}, "
+          f"thinking {planned.thinking}, budget {planned.budget_s / 3600:.1f}h\n{'=' * 60}",
+          flush=True)
+    with open(log_path, "w") as log:
+        log.write(" ".join(command) + "\n\n")
+        log.flush()
+        killed = False
+        try:
+            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                    check=False, timeout=limit)
+            code = result.returncode
+        except subprocess.TimeoutExpired:
+            killed = True
+            code = -1
+    block = read_block(out_dir, planned.leg.id)
+    if block is None:
+        block = {"leg": planned.leg.id, "status": "timeout" if killed else "fail",
+                 "reason": (f"stopped at the planned budget of {planned.budget_s / 3600:.1f}h"
+                            if killed else f"exit {code}, no result block in {log_path}")}
+    elif killed:
+        block["status"] = "timeout"
+        block["reason"] = (f"stopped at the planned budget of {planned.budget_s / 3600:.1f}h; "
+                           f"the numbers here are the ones it had written")
+    block["exit_code"] = code
+    block["log"] = str(log_path)
+    block["_live"] = True
+    return block
+
+
+def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -> dict:
+    """Run every planned leg in catalog order, keeping whatever each one wrote."""
+    results = _skipped_blocks(plan, root)
+    for planned in plan.legs:
+        leg_id = planned.leg.id
+        if missing_reason(planned, root):
+            continue
+        if args.resume and done(out_dir, leg_id):
+            print(f"\n{leg_id}: already passed in this directory, left alone")
+            results[leg_id] = read_block(out_dir, leg_id)
+            continue
+        results[leg_id] = run_leg(planned, args, out_dir, root, plan.model)
+        # The gate leg exists to stop the run before it burns hours.
+        if planned.leg.gate and results[leg_id].get("status") in FAILED_STATUSES:
+            print(f"\n{leg_id} is the gate and it failed: stopping here", file=sys.stderr)
+            break
+    return results
+
+
+def done(out_dir: Path, leg_id: str) -> bool:
+    block = read_block(out_dir, leg_id)
+    return bool(block) and block.get("status") == "pass"
+
+
+def _summary_row(leg_id: str, block: dict) -> str:
+    if block.get("status") == PENDING_STATUS:
+        return f"  {leg_id:16s} not run          {block.get('reason', '')}"
+    return (f"  {leg_id:16s} {block.get('status', '?'):8s} "
+            f"{block.get('correct', 0)}/{block.get('scored', 0)}"
+            f"  {block.get('score_pct', 0)}%  {block.get('tps', 0)} tok/s"
+            f"  cap hits {block.get('cap_hits', 0)}  runaway {block.get('runaway', 0)}"
+            f"  timeouts {block.get('timeout_hits', 0)}")
+
+
+def summarise(plan: RunPlan, results: dict) -> str:
+    lines = [f"\n{'=' * 60}"]
+    lines.append(f"{plan.model} on the portable battery {plan.standard_version}")
+    lines.append(f"Stamp: {plan.stamp_line}")
+    lines.append("=" * 60)
+    for planned in plan.legs:
+        lines.append(_summary_row(planned.leg.id, results.get(planned.leg.id, {})))
+    return "\n".join(lines)
+
+
+def verdict(plan: RunPlan, results: dict, strict: bool) -> int:
+    """Zero when the run is usable, one when something planned did not happen."""
+    broken = [leg_id for leg_id, block in results.items()
+              if block.get("status") in FAILED_STATUSES]
+    absent = [planned.leg.id for planned in plan.legs
+              if results.get(planned.leg.id, {}).get("status") == PENDING_STATUS]
+    if broken:
+        print("\nfailed legs: " + ", ".join(sorted(broken)), file=sys.stderr)
+    if absent:
+        print("\nlegs that did not run: " + ", ".join(sorted(absent)), file=sys.stderr)
+    return 1 if broken or (strict and absent) else 0
+
+
+def gate(plan: RunPlan, args: argparse.Namespace, probes) -> list:
+    """Run the preflight gate and write it into the run directory, or record the bypass."""
+    out_dir = Path(args.out)
+    if args.skip_preflight:
+        print("\npreflight skipped on request: these numbers carry no gate", file=sys.stderr)
+        return []
+    host, server, pilot = probes
+    if host is None:
+        print("\npreflight needs live probes: drop --plan or drop --skip-preflight",
+              file=sys.stderr)
+        return []
+    checks = preflight.run_preflight(plan, host, server, pilot, out_dir, args.resume)
+    preflight.write_preflight(out_dir, plan, checks)
+    print("\n" + preflight.summarise(checks))
+    return checks
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     timer = start_timer()
+    plan, host, server, pilot = load_plan(args)
+    print(plan.render())
+    if args.dry_run:
+        print("\ndry run: nothing was started")
+        return 0
+    if not args.out:
+        print("\n--out is required for a real run", file=sys.stderr)
+        return 2
 
-    print(f"\n{'=' * 60}")
-    print(f"Local Model Battery — {args.model}")
-    print(f"  Endpoint: {args.endpoint}")
-    print(f"  Output:   {args.output_dir}")
-    print(f"{'=' * 60}")
-
-    if not verify_endpoint(args.endpoint, args.model, args.api_key):
-        print(f"ERROR: cannot reach {args.endpoint} or model '{args.model}' not listed",
+    out_dir = Path(args.out).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checks = gate(plan, args, (host, server, pilot))
+    misses = preflight.blocked(checks)
+    if misses:
+        print(f"\npreflight blocked: {', '.join(check.name for check in misses)}",
               file=sys.stderr)
         return 1
-    print("Endpoint reachable, model listed")
 
-    benches = [name for name in MECHANICAL_BENCHES if name not in skipped]
-
-    if args.smoke_only:
-        print("\n--- SMOKE TESTS ---")
-        for name in benches:
-            script = os.path.join(SCRIPTS_DIR, f"bench_{name}.py")
-            extra = ["--limit", str(args.smoke_limit)] if name != "instr_v2" else None
-            result = run_bench(script, args.model, args.endpoint, args.output_dir, extra)
-            if not result["completed"]:
-                print(f"  WARN: {name} smoke failed (exit {result['exit_code']}), continuing")
-        print(f"\nSmoke-only mode done ({elapsed(timer)}).")
-        return 0
-
-    print(f"\n\n{'=' * 60}\nFULL BATTERY\n{'=' * 60}")
-    outcomes: dict[str, dict] = {}
-    for name in benches:
-        script = os.path.join(SCRIPTS_DIR, f"bench_{name}.py")
-        outcomes[name] = run_bench(script, args.model, args.endpoint, args.output_dir)
-        if not outcomes[name]["completed"]:
-            print(f"  ERROR: {name} failed (exit {outcomes[name]['exit_code']})")
-
-    if args.writing:
-        script = os.path.join(SCRIPTS_DIR, "bench_writing_generate.py")
-        outcomes["writing"] = run_bench(
-            script, args.model, args.endpoint, args.output_dir,
-            ["--suite", args.writing_suite, "--answers-dir", args.answers_dir],
-        )
-        if not outcomes["writing"]["completed"]:
-            print("  ERROR: writing generation failed")
-
-    print(f"\n\n{'=' * 60}\nRESULTS SUMMARY\n{'=' * 60}")
-    summary = {"model": args.model, "endpoint": args.endpoint, "results": {}}
-    for name in benches:
-        result = find_latest_result(name, args.model, args.output_dir)
-        if result:
-            summary["results"][name] = headline_of(result)
-            print(f"  {name:20s}  {summary['results'][name]}")
-        else:
-            print(f"  {name:20s}  NOT FOUND")
-
-    if args.writing:
-        summary["writing"] = {
-            "answers_dir": args.answers_dir,
-            "scored": False,
-            "next": "scripts/build_scoring_corpus.py then scripts/score_writing.py",
-        }
-        print("  writing             answers generated; scoring is a separate blind step")
-
-    summary_path = os.path.join(
-        args.output_dir, f"summary-{args.model}-{int(time.time())}.json")
-    with open(summary_path, "w") as handle:
-        json.dump(summary, handle, indent=2)
-    print(f"\nSummary saved to {summary_path}")
-    print(f"Total elapsed: {elapsed(timer)}")
-    return 0
+    manifest.start(out_dir, plan, host, server, resume=args.resume)
+    (out_dir / "run-plan.json").write_text(json.dumps(plan.to_dict(), indent=2) + "\n")
+    results = run_all(plan, args, out_dir, root)
+    notes_path = manifest.close(out_dir, plan, results)
+    print(summarise(plan, results))
+    print(f"\nnotes: {notes_path}")
+    print(f"elapsed: {elapsed(timer)}")
+    if args.json:
+        print(json.dumps({"stamp": plan.stamp_line, "results": results}, indent=2))
+    return verdict(plan, results, args.strict)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
