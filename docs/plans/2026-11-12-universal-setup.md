@@ -31,11 +31,11 @@
 | 8 engine-shaped decisions | not started | |
 | 9 interpreter | **done** | `f95a842` |
 | 10 docs, skill, gate | not started | |
-| 11 detached run | not started | new: requirement 3 |
-| 12 save along the way | not started | new: requirement 3 |
-| 13 the report | not started | new: requirement 4 |
+| 11 detached run | **done** | `dde87ab` |
+| 12 save along the way | **done** | `dde87ab` |
+| 13 the report | **done** | `dde87ab` |
 
-Tasks 1-4, 7 and 9 are in. Task 9 shipped in a different shape than written below; the divergence is recorded in that task.
+Tasks 1-4, 7, 9 and 11-13 are in. Task 9 shipped in a different shape than written below; the divergence is recorded in that task. Tasks 11-13 shipped together, and the report carried a defect the tests caught afterwards — a leg that never ran was printed as "not comparable". Details in `implementation-notes.md`, "Defects found after 11-13 landed".
 
 ---
 
