@@ -6,16 +6,20 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.lib.config import get_dotted, resolve_optional_path, sha256_prefix
 from scripts.lib.env_probe import HostFacts
-from scripts.lib.legs import Leg
+from scripts.lib.legs import Interpreter, Leg, interpreter_hint, resolve_interpreter
 from scripts.lib.server_probe import ServerFacts
 
 NLTK_DATA_DIRS = ("NLTK_DATA",)
 NLTK_SUBDIR = "tokenizers/punkt"
+# Ask the target interpreter, not this one, whether the leg's helpers are importable.
+IMPORT_PROBE = "import importlib, sys\nfor name in sys.argv[1:]: importlib.import_module(name)"
+IMPORT_TIMEOUT_S = 120
 
 
 @dataclass(frozen=True)
@@ -148,8 +152,50 @@ def _judge_dependency(judge: Judge | None) -> Dependency:
 
 def resolve_prereqs(leg: Leg, standard: dict, host: HostFacts,
                     judge: Judge | None = None) -> tuple[Dependency, ...]:
-    """Every prerequisite this leg declares, resolved."""
-    return tuple(resolve_dependency(name, standard, host, judge) for name in leg.prereqs)
+    """Every prerequisite this leg declares, resolved.
+
+    The interpreter check is the one that needs the leg itself, since the path it inspects is
+    resolved from the leg's own environment variable.
+    """
+    resolved = []
+    for name in leg.prereqs:
+        if name == "interpreter_imports":
+            resolved.append(interpreter_dependency(leg, standard))
+        else:
+            resolved.append(resolve_dependency(name, standard, host, judge))
+    return tuple(resolved)
+
+
+def interpreter_dependency(leg: Leg, standard: dict) -> Dependency:
+    """Whether the leg's interpreter can import what the leg's helpers need.
+
+    The check is on the capability, not on the path. A venv that exists but cannot import the
+    package breaks the leg exactly as a missing venv does, and on another machine the path was
+    never the interesting question. This is what makes the leg portable: any 3.x with the
+    package installed satisfies it.
+    """
+    choice: Interpreter = resolve_interpreter(leg, standard)
+    if not choice.imports:
+        return Dependency("interpreter_imports", True, f"{choice.path} ({choice.source})")
+    wanted = ", ".join(choice.imports)
+    if not Path(choice.path).exists():
+        return Dependency("interpreter_imports", False,
+                          f"{choice.path} does not exist, so it cannot import {wanted}: "
+                          f"{interpreter_hint(leg, choice)}")
+    try:
+        result = subprocess.run([choice.path, "-c", IMPORT_PROBE, *choice.imports],
+                                capture_output=True, text=True, timeout=IMPORT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Dependency("interpreter_imports", False,
+                          f"{choice.path} could not be asked about {wanted}: {exc}")
+    if result.returncode == 0:
+        return Dependency("interpreter_imports", True,
+                          f"{choice.path} ({choice.source}) imports {wanted}")
+    trouble = result.stderr.strip().splitlines()
+    return Dependency("interpreter_imports", False,
+                      f"{choice.path} cannot import {wanted}: "
+                      f"{trouble[-1] if trouble else 'no reason given'}; "
+                      f"{interpreter_hint(leg, choice)}")
 
 
 def unavailable(dependencies: tuple[Dependency, ...]) -> tuple[Dependency, ...]:

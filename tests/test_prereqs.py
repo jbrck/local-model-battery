@@ -8,6 +8,7 @@ import unittest
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -16,6 +17,7 @@ from scripts.lib.env_probe import HostFacts, ToolFact  # noqa: E402
 from scripts.lib.legs import legs_by_id, load_legs  # noqa: E402
 from scripts.lib.prereqs import (  # noqa: E402
     Judge,
+    interpreter_dependency,
     resolve_dependency,
     resolve_prereqs,
     thinking_available,
@@ -193,10 +195,22 @@ class LegPrereqTest(unittest.TestCase):
     def test_a_leg_with_no_prereqs_resolves_to_nothing(self):
         self.assertEqual(resolve_prereqs(LEGS["math500"], STANDARD, host_with()), ())
 
-    def test_lcb_resolves_source_and_data(self):
+    def test_lcb_resolves_source_data_and_interpreter(self):
         dependencies = resolve_prereqs(LEGS["lcb"], STANDARD, host_with())
-        self.assertEqual([item.name for item in dependencies], ["lcb_source", "lcb_data"])
-        self.assertEqual(len(unavailable(dependencies)), 2)
+        self.assertEqual([item.name for item in dependencies],
+                         ["lcb_source", "lcb_data", "interpreter_imports"])
+        self.assertEqual([item.name for item in unavailable(dependencies)],
+                         ["lcb_source", "lcb_data"])
+
+    def test_a_borrowed_interpreter_without_the_package_says_so(self):
+        """The check is on the capability, not the path: a python that exists but cannot
+        import the package breaks the leg exactly as a missing one does."""
+        standard = {**STANDARD, "interpreters": {"LCB_PYTHON": sys.executable}}
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
+            dependency = interpreter_dependency(LEGS["lcb"], standard)
+        self.assertFalse(dependency.available)
+        self.assertIn("datasets", dependency.detail)
+        self.assertIn("LCB_PYTHON", dependency.detail)
 
     def test_judge_configuration_reaches_the_writing_leg(self):
         judge = Judge(model="judge", endpoint="http://host/v1", under_test="model")

@@ -542,8 +542,9 @@ class InterpreterSheetTest(unittest.TestCase):
     def test_a_leg_that_borrows_an_interpreter_says_so(self):
         row = decision(self.lcb_plan(), "interpreter:lcb")
         self.assertEqual(row.kind, KIND_DEPENDENCY)
-        self.assertEqual(row.chosen, BY_ID["lcb"].interpreter)
-        self.assertIn("minute zero", row.consequence)
+        self.assertEqual(row.chosen, row.standard_value)
+        self.assertNotEqual(row.chosen, sys.executable)
+        self.assertIn("LCB_PYTHON", row.consequence)
 
     def test_a_leg_that_borrows_nothing_has_no_row(self):
         rows = [row.variable for row in plan(SMALL, selected=FREE).decisions]

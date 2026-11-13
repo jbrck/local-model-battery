@@ -144,7 +144,7 @@ def leg_command(planned, args: argparse.Namespace, out_dir: Path, root: str,
                 model: str) -> list[str]:
     """The exact command line one leg runs under: every knob the plan decided shows up here."""
     entry = _entry_path(root, planned)
-    command = [planned.leg.interpreter or sys.executable, str(entry),
+    command = [planned.interpreter or sys.executable, str(entry),
                "--model", model,
                "--endpoint", args.endpoint, "--api-key", args.api_key,
                "--output-dir", str(out_dir / LEGS_DIR),

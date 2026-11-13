@@ -19,7 +19,7 @@ from scripts.lib.fit import (
     kv_bytes_per_token,
     parse_kv_bits,
 )
-from scripts.lib.legs import Leg, resolve_cap
+from scripts.lib.legs import Leg, interpreter_hint, resolve_cap, resolve_interpreter
 from scripts.lib.model_probe import SOURCE_PROFILE, SOURCE_UNKNOWN, ModelShape
 from scripts.lib.pilot import PilotResult
 from scripts.lib.prereqs import (
@@ -181,6 +181,8 @@ class PlannedLeg:
     dependencies: tuple[Dependency, ...] = ()
     extra_args: tuple[str, ...] = ()
     note: str = ""
+    interpreter: str = ""
+    interpreter_source: str = ""
 
     @property
     def id(self) -> str:
@@ -197,6 +199,7 @@ class PlannedLeg:
             "gate": self.leg.gate, "items": self.leg.items,
             "case_timeout_s": self.case_timeout_s, "extra_args": list(self.extra_args),
             "dependencies": [item.to_dict() for item in self.dependencies],
+            "interpreter": self.interpreter, "interpreter_source": self.interpreter_source,
         }
 
 
@@ -572,10 +575,13 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
                                 "instead of scoring zero"))))
             continue
         mode, note = resolve_thinking(leg, thinking_request, server)
+        interpreter = resolve_interpreter(leg, standard)
         planned.append(PlannedLeg(leg=leg, cap=cap, ctx=ctx, thinking=mode,
                                   budget_s=budget_seconds(leg, cap, pilot, standard),
                                   case_timeout_s=pilot.case_timeout_s(cap),
-                                  dependencies=dependencies, note=note))
+                                  dependencies=dependencies, note=note,
+                                  interpreter=interpreter.path,
+                                  interpreter_source=interpreter.source))
         clamped = cap != standard_cap
         options: tuple[Option, ...] = ()
         if clamped:
@@ -598,15 +604,15 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
             consequence=f"{leg.id} is scored by {leg.harness} at this commit; a harness bump "
                         f"voids the comparison with earlier runs",
             source=STANDARD))
-        if leg.interpreter:
+        if interpreter.borrowed:
             decisions.append(Decision(
                 variable=f"interpreter:{leg.id}", kind=KIND_DEPENDENCY,
-                chosen=leg.interpreter, standard_value=leg.interpreter,
-                consequence=f"{leg.id} runs under {leg.interpreter} because its prompt helpers "
-                            f"import from the checkout; the orchestrator's own interpreter does "
-                            f"not carry those dependencies, so a wrong path here fails the leg "
-                            f"at minute zero",
-                source=STANDARD))
+                chosen=interpreter.path, standard_value=interpreter.path,
+                consequence=(f"{leg.id} runs under {interpreter.path} ({interpreter.source}) "
+                             f"because its prompt helpers import from the checkout; the "
+                             f"orchestrator's own interpreter does not carry those "
+                             f"dependencies, so {interpreter_hint(leg, interpreter)}"),
+                source=STANDARD if interpreter.source in ("standard", "declared") else HOST))
     return planned, skips, decisions
 
 

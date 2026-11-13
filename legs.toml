@@ -259,11 +259,20 @@ cap_var = "caps.lcb"
 ctx_need = 114688
 thinking = "primary_on"
 thinking_effect = "removing the reasoning budget moved 66% -> 76% and added about 8 hours"
-prereqs = ["lcb_source", "lcb_data"]
+prereqs = ["lcb_source", "lcb_data", "interpreter_imports"]
 resume = "done_marker"
 # The prompt helpers come from the checkout, so this leg runs under an interpreter that
-# carries lcb_runner's dependencies. The repo's own venv has no datasets.
-interpreter = "/mnt/data/benchmark-venv/bin/python3"
+# carries their dependencies. Name it in the environment rather than in a path here: a
+# hardcoded path only works on the machine the catalog was written on, and the one that used
+# to sit here pointed at a python without them. Set LCB_PYTHON, or put the machine-local
+# default in the standard's [interpreters] table. The check below imports these names under
+# whatever that resolves to, so an interpreter that cannot carry the leg fails up front
+# rather than at minute zero.
+interpreter_env = "LCB_PYTHON"
+# What the interpreter has to supply. lcb_runner itself is not checked: it lives in the
+# checkout, which the adapter puts on sys.path at run time. The battery's own venv has no
+# datasets, which is the dependency that made this leg need a different interpreter.
+interpreter_imports = ["datasets"]
 comparability_keys = ["cap", "ctx", "thinking", "items_sha", "slots"]
 known_failures = [
   "16 of 100 problems never emitted a code block and consumed 7.4 of 14.1 hours",

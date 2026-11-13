@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -14,6 +15,7 @@ from scripts.lib.legs import (  # noqa: E402
     load_legs,
     load_raw_legs,
     resolve_cap,
+    resolve_interpreter,
     validate_legs,
 )
 
@@ -151,13 +153,47 @@ class ValidationTest(unittest.TestCase):
 class InterpreterTest(unittest.TestCase):
     """A leg can borrow another venv's interpreter, which is how the LCB leg runs at all."""
 
-    def test_the_lcb_leg_declares_the_interpreter_its_prompt_helpers_need(self):
-        leg = legs_by_id(load_legs(load_toml("standard.toml")))["lcb"]
-        self.assertEqual(leg.interpreter, "/mnt/data/benchmark-venv/bin/python3")
-        self.assertEqual(leg.to_dict()["interpreter"], leg.interpreter)
+    def lcb(self) -> tuple[Leg, dict]:
+        standard = load_toml("standard.toml")
+        return legs_by_id(load_legs(standard))["lcb"], standard
+
+    def test_the_lcb_leg_names_the_variable_that_holds_its_interpreter(self):
+        """The catalog names the environment variable, never a path that only exists here."""
+        leg, _ = self.lcb()
+        self.assertEqual(leg.interpreter_env, "LCB_PYTHON")
+        self.assertEqual(leg.to_dict()["interpreter_env"], "LCB_PYTHON")
+
+    def test_the_lcb_leg_declares_the_dependency_its_interpreter_must_supply(self):
+        """lcb_runner comes from the checkout on sys.path; the interpreter supplies datasets."""
+        leg, _ = self.lcb()
+        self.assertEqual(leg.interpreter_imports, ("datasets",))
+        self.assertEqual(leg.to_dict()["interpreter_imports"], ["datasets"])
+
+    def test_the_lcb_leg_carries_no_machine_local_path(self):
+        leg, _ = self.lcb()
+        self.assertEqual(leg.interpreter, "")
 
     def test_a_leg_without_one_borrows_nothing(self):
         self.assertEqual(make_leg().interpreter, "")
+
+    def test_the_environment_variable_beats_the_standard(self):
+        leg, standard = self.lcb()
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": "/elsewhere/bin/python3"}):
+            choice = resolve_interpreter(leg, standard)
+        self.assertEqual(choice.path, "/elsewhere/bin/python3")
+        self.assertEqual(choice.source, "environment")
+
+    def test_the_standard_supplies_the_path_when_the_variable_is_unset(self):
+        leg, standard = self.lcb()
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
+            choice = resolve_interpreter(leg, standard)
+        self.assertEqual(choice.source, "standard")
+        self.assertEqual(choice.path, standard["interpreters"]["LCB_PYTHON"])
+
+    def test_a_leg_with_nothing_declared_runs_under_this_interpreter(self):
+        choice = resolve_interpreter(make_leg(), {})
+        self.assertEqual(choice.path, sys.executable)
+        self.assertFalse(choice.borrowed)
 
     def test_a_relative_interpreter_is_reported(self):
         problems = validate_legs([make_leg(interpreter="python3")])
@@ -165,6 +201,19 @@ class InterpreterTest(unittest.TestCase):
 
     def test_an_absolute_interpreter_is_accepted(self):
         self.assertEqual(validate_legs([make_leg(interpreter="/usr/bin/python3")]), [])
+
+    def test_an_import_with_no_variable_to_resolve_it_against_is_reported(self):
+        problems = validate_legs([make_leg(interpreter_imports=("datasets",))])
+        self.assertIn("needs an interpreter_env", " ".join(problems))
+
+    def test_a_lowercase_environment_variable_name_is_reported(self):
+        problems = validate_legs([make_leg(interpreter_env="lcb_python")])
+        self.assertIn("environment variable name", " ".join(problems))
+
+    def test_an_import_that_is_not_a_module_name_is_reported(self):
+        problems = validate_legs([make_leg(interpreter_env="LCB_PYTHON",
+                                           interpreter_imports=("../evil",))])
+        self.assertIn("is not a module name", " ".join(problems))
 
 
 if __name__ == "__main__":

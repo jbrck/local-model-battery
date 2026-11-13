@@ -394,10 +394,11 @@ class InterpreterTest(FakeRun):
     """A leg that declares an interpreter runs under it; a leg that does not runs under this one."""
 
     def math500(self, interpreter: str) -> PlannedLeg:
+        """The planned leg, carrying the interpreter the plan resolved for it."""
         leg = replace(fixtures.BY_ID["math500"], implementation="in_repo",
-                      entry="scripts/bench_math500.py", interpreter=interpreter)
+                      entry="scripts/bench_math500.py")
         return PlannedLeg(leg=leg, cap=8192, ctx=131072, thinking="n/a", budget_s=0,
-                          case_timeout_s=600)
+                          case_timeout_s=600, interpreter=interpreter)
 
     def test_a_declared_interpreter_runs_the_leg(self):
         command = run_battery.leg_command(self.math500("/opt/other/bin/python3"), self.args(),

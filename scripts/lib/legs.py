@@ -1,13 +1,19 @@
 """Leg catalog: which benchmarks the battery can run, and what each one needs."""
 from __future__ import annotations
 
+import os
 import re
+import sys
 from dataclasses import dataclass
 
 from scripts.lib.config import get_dotted, load_toml, missing_fields
 
 LEGS_FILE = "legs.toml"
 LEG_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# An interpreter is named by the environment variable that holds its path, and that name is
+# also the key in the standard's `[interpreters]` table. Uppercase keeps them recognisable.
+INTERPRETER_ENV_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+IMPORT_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 HARNESS_KINDS = ("native", "adapter")
 IMPLEMENTATIONS = ("in_repo", "port_pending")
 THINKING_MODES = ("primary_on", "primary_off", "required_on", "required_off", "n/a")
@@ -23,6 +29,7 @@ KNOWN_DEPENDENCIES = (
     "lcb_data",
     "nltk_data",
     "judge_endpoint",
+    "interpreter_imports",
 )
 
 REQUIRED_FIELDS = (
@@ -56,6 +63,8 @@ class Leg:
     budget_floor: int = 0
     data: str = ""
     interpreter: str = ""
+    interpreter_env: str = ""
+    interpreter_imports: tuple[str, ...] = ()
 
     @property
     def implemented(self) -> bool:
@@ -74,6 +83,8 @@ class Leg:
             "known_failures": list(self.known_failures), "gate": self.gate,
             "items": self.items, "budget_floor": self.budget_floor, "data": self.data,
             "interpreter": self.interpreter,
+            "interpreter_env": self.interpreter_env,
+            "interpreter_imports": list(self.interpreter_imports),
         }
 
 
@@ -105,6 +116,8 @@ def load_legs(standard: dict, path: str = LEGS_FILE) -> list[Leg]:
             budget_floor=int(floors.get(leg_id, 0)),
             data=str(raw.get("data", "")),
             interpreter=str(raw.get("interpreter", "")),
+            interpreter_env=str(raw.get("interpreter_env", "")),
+            interpreter_imports=tuple(raw.get("interpreter_imports", ())),
         ))
     return legs
 
@@ -183,9 +196,76 @@ def _check_interpreter(leg: Leg) -> list[str]:
     It has to be absolute: the orchestrator runs legs from its own working directory, so a
     relative interpreter would resolve to whatever directory that happens to be.
     """
+    problems = []
     if leg.interpreter and not leg.interpreter.startswith("/"):
-        return [f"{leg.id}: interpreter {leg.interpreter!r} must be an absolute path"]
-    return []
+        problems.append(f"{leg.id}: interpreter {leg.interpreter!r} must be an absolute path")
+    if leg.interpreter_env and not INTERPRETER_ENV_PATTERN.match(leg.interpreter_env):
+        problems.append(f"{leg.id}: interpreter_env {leg.interpreter_env!r} must be an "
+                        f"environment variable name like LCB_PYTHON")
+    if leg.interpreter_imports and not leg.interpreter_env:
+        problems.append(f"{leg.id}: interpreter_imports needs an interpreter_env to resolve "
+                        f"against")
+    for name in leg.interpreter_imports:
+        if not IMPORT_NAME_PATTERN.match(name):
+            problems.append(f"{leg.id}: interpreter_imports entry {name!r} is not a module name")
+    return problems
+
+
+@dataclass(frozen=True)
+class Interpreter:
+    """Which python runs a leg, and where that choice came from.
+
+    A leg that imports another project's helper package cannot assume the orchestrator's
+    interpreter has it, and it cannot assume the other venv sits where it sat on the machine
+    the catalog was written on. So the leg names the environment variable that holds the path,
+    the operator's standard supplies the machine-local default, and the fallback is the
+    interpreter already running the battery.
+    """
+
+    path: str
+    source: str
+    env_name: str = ""
+    imports: tuple[str, ...] = ()
+
+    @property
+    def borrowed(self) -> bool:
+        """True when the leg runs under an interpreter other than the orchestrator's own."""
+        return self.path != sys.executable
+
+    def to_dict(self) -> dict:
+        return {"path": self.path, "source": self.source, "env_name": self.env_name,
+                "imports": list(self.imports), "borrowed": self.borrowed}
+
+
+def resolve_interpreter(leg: Leg, standard: dict) -> Interpreter:
+    """The interpreter for this leg: the environment variable, then the standard, then this one.
+
+    The environment variable wins because it is the only choice that can be right on a machine
+    other than the one the catalog was written on. A variable that is set but wrong is returned
+    as-is rather than falling through, because a silently ignored path is harder to find than a
+    failed import.
+    """
+    if leg.interpreter_env:
+        from_env = os.environ.get(leg.interpreter_env, "")
+        if from_env:
+            return Interpreter(path=from_env, source="environment", env_name=leg.interpreter_env,
+                               imports=leg.interpreter_imports)
+        declared_in_standard = get_dotted(standard, f"interpreters.{leg.interpreter_env}")
+        if declared_in_standard:
+            return Interpreter(path=str(declared_in_standard), source="standard",
+                               env_name=leg.interpreter_env, imports=leg.interpreter_imports)
+    if leg.interpreter:
+        return Interpreter(path=leg.interpreter, source="declared",
+                           imports=leg.interpreter_imports)
+    return Interpreter(path=sys.executable, source="this interpreter",
+                       env_name=leg.interpreter_env, imports=leg.interpreter_imports)
+
+
+def interpreter_hint(leg: Leg, choice: Interpreter) -> str:
+    """What the operator has to set for this leg's helpers to be importable."""
+    if choice.env_name:
+        return (f"set {choice.env_name} or add interpreters.{choice.env_name} to the standard")
+    return f"declare an interpreter_env on {leg.id}"
 
 
 def validate_legs(legs: list[Leg], raw: list[dict] | None = None) -> list[str]:

@@ -167,6 +167,19 @@ items = 70
 source = "Original"
 license = "MIT"
 
+# Where a leg's helper interpreter lives on this machine.
+#
+# A leg that imports another project's helpers (LiveCodeBench's lcb_runner, say) cannot run
+# under the battery's own interpreter. The catalog names the environment variable; this table
+# gives it a machine-local default. The environment wins when it is set, so a host that keeps
+# its venv somewhere else only has to export the variable -- nothing here has to change, and
+# nothing here is a claim about any other machine. The leg's own check runs `import` under
+# whatever this resolves to, so a path that points at a venv without the packages fails the
+# leg up front rather than at minute zero.
+
+[interpreters]
+LCB_PYTHON = "/mnt/data/benchmark-venv/bin/python3"
+
 # Sources this repo does not redistribute. `path_env` overrides `path` when set.
 
 [[data.external]]
