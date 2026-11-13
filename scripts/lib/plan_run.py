@@ -20,7 +20,7 @@ from scripts.lib.fit import (
     kv_bytes_per_token,
     parse_kv_bits,
 )
-from scripts.lib.legs import Leg, interpreter_hint, resolve_cap, resolve_interpreter
+from scripts.lib.legs import Interpreter, Leg, interpreter_hint, resolve_cap, resolve_interpreter
 from scripts.lib.model_probe import SOURCE_PROFILE, SOURCE_UNKNOWN, ModelShape
 from scripts.lib.pilot import PilotResult
 from scripts.lib.prereqs import (
@@ -292,6 +292,22 @@ class RunPlan:
 
     def render(self) -> str:
         """The sheet the setup skill reads out loud, one decision at a time."""
+        lines = self._summary_lines()
+        lines += self._deviation_lines()
+        if self.skips:
+            lines.append("")
+            lines.append("Skipped")
+            lines += self._skipped_lines()
+        lines += _pending_block(self.needs_operator)
+        lines += _fixed_block(tuple(item for item in self.decisions if not item.needs_operator))
+        lines.append("")
+        lines.append("Legs")
+        lines += [_leg_line(planned) for planned in self.legs]
+        lines += self._warning_lines()
+        return "\n".join(lines)
+
+    def _summary_lines(self) -> list[str]:
+        """The header: what model, what fit, what engine, what the run costs worst-case."""
         lines = [
             f"Battery {self.standard_version} plan -- {self.model}",
             "=" * 60,
@@ -304,21 +320,12 @@ class RunPlan:
             lines.append(shape_line)
         lines.append(f"legs     {len(self.legs)} runnable, {len(self.skips)} skipped, "
                      f"{_hours(self.total_budget_s)} of worst-case budget")
-        lines += self._deviation_lines()
-        if self.skips:
-            lines.append("")
-            lines.append("Skipped")
-            lines += self._skipped_lines()
-        lines += _pending_block(self.needs_operator)
-        lines += _fixed_block(tuple(item for item in self.decisions if not item.needs_operator))
-        lines.append("")
-        lines.append("Legs")
-        lines += [_leg_line(planned) for planned in self.legs]
-        if self.warnings:
-            lines.append("")
-            lines.append("Warnings")
-            lines += [f"  ! {warning}" for warning in self.warnings]
-        return "\n".join(lines)
+        return lines
+
+    def _warning_lines(self) -> list[str]:
+        if not self.warnings:
+            return []
+        return ["", "Warnings"] + [f"  ! {warning}" for warning in self.warnings]
 
     def _deviation_lines(self) -> list[str]:
         if not self.deviations:
@@ -506,6 +513,15 @@ def budget_seconds(leg: Leg, cap: int, pilot: PilotResult, standard: dict) -> in
 def resolve_thinking(leg: Leg, requested: str, server: ServerFacts) -> tuple[str, str]:
     """(the mode this leg runs in, a note when the endpoint forces it)."""
     honors, why = thinking_available(server)
+    pinned = _pinned_thinking(leg, requested, honors, why)
+    if pinned is not None:
+        return pinned
+    return _requested_thinking(requested, honors, why)
+
+
+def _pinned_thinking(leg: Leg, requested: str, honors: bool,
+                     why: str) -> tuple[str, str] | None:
+    """The mode a leg whose catalog row pins the channel, or None when the request decides."""
     if leg.thinking == "n/a":
         return "n/a", ""
     if leg.thinking == "required_off":
@@ -514,11 +530,16 @@ def resolve_thinking(leg: Leg, requested: str, server: ServerFacts) -> tuple[str
         if honors:
             return "on", ""
         return "on", f"the endpoint ignores the thinking flag ({why}); stamp native-forced"
-    if requested == "off":
-        if honors:
-            return "off", ""
-        return "on", f"the endpoint ignores the thinking flag ({why}); stays in the on column"
-    return "on", ""
+    return None
+
+
+def _requested_thinking(requested: str, honors: bool, why: str) -> tuple[str, str]:
+    """The mode the profile's request decides, unless the endpoint cannot honour it."""
+    if requested != "off":
+        return "on", ""
+    if honors:
+        return "off", ""
+    return "on", f"the endpoint ignores the thinking flag ({why}); stays in the on column"
 
 
 def prompt_headroom(standard: dict) -> int:
@@ -588,15 +609,7 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
         missing = unavailable(dependencies)
         if missing:
             skips.append(Skip(leg.id, "; ".join(item.detail for item in missing)))
-            decisions.append(Decision(
-                variable=f"prereq:{leg.id}", kind=KIND_DEPENDENCY, chosen="skip",
-                standard_value="run",
-                consequence=f"{leg.id} is skipped here: {missing[0].detail}",
-                source=HOST, needs_operator=True,
-                options=(Option("install it and re-plan", missing[0].detail,
-                                recommended=True),
-                         Option("accept the skip", "the leg is absent from the manifest "
-                                "instead of scoring zero"))))
+            decisions.append(_skip_decision(leg, missing))
             continue
         mode, note = resolve_thinking(leg, thinking_request, server)
         interpreter = resolve_interpreter(leg, standard)
@@ -606,38 +619,65 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
                                   dependencies=dependencies, note=note,
                                   interpreter=interpreter.path,
                                   interpreter_source=interpreter.source))
-        clamped = cap != standard_cap
-        options: tuple[Option, ...] = ()
-        if clamped:
-            options = (
-                Option(f"accept the {cap} ceiling",
-                       "runs that would have used more are cut short and score low",
-                       recommended=True),
-                Option("raise the window", "needs a host or a quant that fits it"),
-            )
-        decisions.append(Decision(
-            variable=f"cap:{leg.id}", kind=KIND_MEASUREMENT, chosen=str(cap),
-            standard_value=str(standard_cap),
-            consequence=(f"{leg.id} cannot use its {standard_cap}-token cap inside a "
-                         f"{ctx}-token window; the cap drops to {cap}" if clamped else
-                         f"{leg.id} may generate {cap} tokens an answer, as the standard asks"),
-            source=HOST if clamped else STANDARD, options=options, needs_operator=clamped))
-        decisions.append(Decision(
-            variable=f"harness_version:{leg.id}", kind=KIND_MEASUREMENT,
-            chosen=leg.harness, standard_value=leg.harness,
-            consequence=f"{leg.id} is scored by {leg.harness} at this commit; a harness bump "
-                        f"voids the comparison with earlier runs",
-            source=STANDARD))
+        decisions.append(_cap_decision(leg, cap, standard_cap, ctx))
+        decisions.append(_harness_decision(leg))
         if interpreter.borrowed:
-            decisions.append(Decision(
-                variable=f"interpreter:{leg.id}", kind=KIND_DEPENDENCY,
-                chosen=interpreter.path, standard_value=interpreter.path,
-                consequence=(f"{leg.id} runs under {interpreter.path} ({interpreter.source}) "
-                             f"because its prompt helpers import from the checkout; the "
-                             f"orchestrator's own interpreter does not carry those "
-                             f"dependencies, so {interpreter_hint(leg, interpreter)}"),
-                source=STANDARD if interpreter.source in ("standard", "declared") else HOST))
+            decisions.append(_interpreter_decision(leg, interpreter))
     return planned, skips, decisions
+
+
+def _skip_decision(leg: Leg, missing: tuple[Dependency, ...]) -> Decision:
+    """The question a skipped leg puts to the operator: install it, or accept the gap."""
+    return Decision(
+        variable=f"prereq:{leg.id}", kind=KIND_DEPENDENCY, chosen="skip",
+        standard_value="run",
+        consequence=f"{leg.id} is skipped here: {missing[0].detail}",
+        source=HOST, needs_operator=True,
+        options=(Option("install it and re-plan", missing[0].detail, recommended=True),
+                 Option("accept the skip", "the leg is absent from the manifest "
+                        "instead of scoring zero")))
+
+
+def _cap_decision(leg: Leg, cap: int, standard_cap: int, ctx: int) -> Decision:
+    """The cap row: what the window does to how much a leg may generate."""
+    clamped = cap != standard_cap
+    options: tuple[Option, ...] = ()
+    if clamped:
+        options = (
+            Option(f"accept the {cap} ceiling",
+                   "runs that would have used more are cut short and score low",
+                   recommended=True),
+            Option("raise the window", "needs a host or a quant that fits it"),
+        )
+    return Decision(
+        variable=f"cap:{leg.id}", kind=KIND_MEASUREMENT, chosen=str(cap),
+        standard_value=str(standard_cap),
+        consequence=(f"{leg.id} cannot use its {standard_cap}-token cap inside a "
+                     f"{ctx}-token window; the cap drops to {cap}" if clamped else
+                     f"{leg.id} may generate {cap} tokens an answer, as the standard asks"),
+        source=HOST if clamped else STANDARD, options=options, needs_operator=clamped)
+
+
+def _harness_decision(leg: Leg) -> Decision:
+    """The harness row: which scorer ran, so a bump voids the comparison with earlier runs."""
+    return Decision(
+        variable=f"harness_version:{leg.id}", kind=KIND_MEASUREMENT,
+        chosen=leg.harness, standard_value=leg.harness,
+        consequence=f"{leg.id} is scored by {leg.harness} at this commit; a harness bump "
+                    f"voids the comparison with earlier runs",
+        source=STANDARD)
+
+
+def _interpreter_decision(leg: Leg, interpreter: Interpreter) -> Decision:
+    """The row that says a leg runs under a borrowed interpreter, and why it must."""
+    return Decision(
+        variable=f"interpreter:{leg.id}", kind=KIND_DEPENDENCY,
+        chosen=interpreter.path, standard_value=interpreter.path,
+        consequence=(f"{leg.id} runs under {interpreter.path} ({interpreter.source}) "
+                     f"because its prompt helpers import from the checkout; the "
+                     f"orchestrator's own interpreter does not carry those "
+                     f"dependencies, so {interpreter_hint(leg, interpreter)}"),
+        source=STANDARD if interpreter.source in ("standard", "declared") else HOST)
 
 
 @dataclass(frozen=True)
@@ -681,31 +721,55 @@ def _placement(fit: Fit) -> str:
 
 def capacity_decisions(inputs: _PlanInputs) -> list[Decision]:
     """What the host is made of. Stamped for comparison, never asked about."""
-    host, fit = inputs.host, inputs.fit
+    return (_host_capacity_rows(inputs.host, inputs.fit)
+            + [_engine_capacity_row(inputs)]
+            + _profile_capacity_rows(inputs.profile))
+
+
+def _capacity_row(name: str, value: str, note: str, source: str) -> Decision:
+    """One capacity row: the host is what it is, so there is no standard to deviate from."""
+    return Decision(variable=name, kind=KIND_CAPACITY, chosen=value, standard_value="n/a",
+                    consequence=note, source=source)
+
+
+def _host_capacity_rows(host: HostFacts, fit: Fit) -> list[Decision]:
+    """The machine rows: cards, RAM, the power ceiling and where the weights sit."""
     names = ", ".join(gpu.name for gpu in host.gpus) or "none reported"
     limits = [gpu.power_limit_w for gpu in host.gpus if gpu.power_limit_w]
     rows = (
         ("host_vram", f"{host.vram_total_gb:g} GB",
-         f"{len(host.gpus)} GPU(s): {names}; {host.vram_used_gb:g} GB already in use", HOST),
+         f"{len(host.gpus)} GPU(s): {names}; {host.vram_used_gb:g} GB already in use"),
         ("host_ram", f"{host.ram_total_gb or 0:g} GB",
-         f"{host.ram_available_gb or 0:g} GB available to spill into", HOST),
-        ("power_limit", f"{min(limits):g} W" if limits else "not reported",
-         "the lowest card limit caps throughput for the whole run", HOST),
-        ("offload_placement", _placement(fit), f"tier {fit.tier}: {fit.verdict}", HOST),
-        ("engine_version", _engine_version(inputs.engine, inputs.server),
-         f"as reported by {inputs.server.served_model or 'the endpoint'}", ENGINE),
-        ("weight_quant", str(inputs.profile.get("weight_quant") or "unknown"),
-         "from the profile; two quants of one model are not the same entry", PROFILE),
-        ("spec_decode", str(inputs.profile.get("spec_decode") or "off"),
-         "draft-model decoding changes tokens per second and sometimes the ranking", PROFILE),
-        ("draft_model", str(inputs.profile.get("draft_model") or "none"),
-         "only meaningful when spec_decode is on", PROFILE),
+         f"{host.ram_available_gb or 0:g} GB available to spill into"),
+        ("power_limit", _power_limit(limits),
+         "the lowest card limit caps throughput for the whole run"),
+        ("offload_placement", _placement(fit), f"tier {fit.tier}: {fit.verdict}"),
     )
-    return [
-        Decision(variable=name, kind=KIND_CAPACITY, chosen=value, standard_value="n/a",
-                 consequence=note, source=source)
-        for name, value, note, source in rows
-    ]
+    return [_capacity_row(name, value, note, HOST) for name, value, note in rows]
+
+
+def _power_limit(limits: list) -> str:
+    """The lowest card limit, or the honest blank when no card reported one."""
+    return f"{min(limits):g} W" if limits else "not reported"
+
+
+def _engine_capacity_row(inputs: _PlanInputs) -> Decision:
+    return _capacity_row("engine_version", _engine_version(inputs.engine, inputs.server),
+                         f"as reported by {inputs.server.served_model or 'the endpoint'}",
+                         ENGINE)
+
+
+def _profile_capacity_rows(profile: dict) -> list[Decision]:
+    """The rows that come from the profile's claims about the model."""
+    rows = (
+        ("weight_quant", str(profile.get("weight_quant") or "unknown"),
+         "from the profile; two quants of one model are not the same entry"),
+        ("spec_decode", str(profile.get("spec_decode") or "off"),
+         "draft-model decoding changes tokens per second and sometimes the ranking"),
+        ("draft_model", str(profile.get("draft_model") or "none"),
+         "only meaningful when spec_decode is on"),
+    )
+    return [_capacity_row(name, value, note, PROFILE) for name, value, note in rows]
 
 
 def _items_summary(standard: dict) -> str:
@@ -867,32 +931,40 @@ def _kv_decision(inputs: _PlanInputs, pinned: str) -> Decision:
 def _thinking_decision(inputs: _PlanInputs) -> Decision:
     requested = str(inputs.profile.get("thinking") or THINKING_STANDARD)
     honors, why = thinking_available(inputs.server)
-    options: tuple[Option, ...] = ()
-    if not honors:
-        options = (
-            Option("run in the on column", f"the endpoint ignores the switch ({why}); stamp "
-                   "thinking=native-forced", recommended=True),
-            Option("switch endpoints", "point the run at a server that honours the flag"),
-        )
-    elif requested == THINKING_STANDARD and inputs.footprint.known and inputs.fit.tier != "T1":
-        # The model does not fit the card, so every reasoning token is paid for in RAM
-        # bandwidth as well as time. That is the case the operator has to decide, not the
-        # standard: on is the standard, off is a different measurement.
-        options = (
-            Option("keep thinking on",
-                   f"stays on-standard; the weights do not fit the card ({inputs.fit.reason}), "
-                   f"so the reasoning tokens cost RAM bandwidth on top of wall clock",
-                   recommended=True),
-            Option("turn it off",
-                   "stamp thinking=off, off-standard: shorter cases on a box that is already "
-                   "spilling, at the cost measured here"),
-        )
+    options = _thinking_options(inputs, requested, honors, why)
     return Decision("thinking", KIND_MEASUREMENT, requested if honors else "native",
                     THINKING_STANDARD,
                     f"the flag {'works' if honors else 'does nothing'} here ({why}); thinking "
                     f"off costs MATH 7.8 and GPQA 28.3 points",
                     PROFILE if requested != THINKING_STANDARD else STANDARD,
                     options=options, needs_operator=bool(options))
+
+
+def _thinking_options(inputs: _PlanInputs, requested: str, honors: bool,
+                      why: str) -> tuple[Option, ...]:
+    """The choices thinking puts to the operator, or none when the standard already answered."""
+    if not honors:
+        return (
+            Option("run in the on column", f"the endpoint ignores the switch ({why}); stamp "
+                   "thinking=native-forced", recommended=True),
+            Option("switch endpoints", "point the run at a server that honours the flag"),
+        )
+    if requested == THINKING_STANDARD and inputs.footprint.known and inputs.fit.tier != "T1":
+        return _ram_bandwidth_options(inputs)
+    return ()
+
+
+def _ram_bandwidth_options(inputs: _PlanInputs) -> tuple[Option, ...]:
+    """The weights miss the card, so every reasoning token also costs RAM bandwidth."""
+    return (
+        Option("keep thinking on",
+               f"stays on-standard; the weights do not fit the card ({inputs.fit.reason}), "
+               f"so the reasoning tokens cost RAM bandwidth on top of wall clock",
+               recommended=True),
+        Option("turn it off",
+               "stamp thinking=off, off-standard: shorter cases on a box that is already "
+               "spilling, at the cost measured here"),
+    )
 
 
 def _case_timeout_decision(inputs: _PlanInputs) -> Decision:
@@ -964,17 +1036,37 @@ def build_stamp(variables: list[Variable], decisions: list[Decision]) -> dict:
 def plan_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
     """Everything the operator should know before spending hours on this run."""
     warnings = list(verify_bundled_data(inputs.standard))
-    fit, host, pilot = inputs.fit, inputs.host, inputs.pilot
-    if not inputs.footprint.known:
-        warnings.append("model shape is incomplete ("
-                        + ", ".join(inputs.footprint.missing)
-                        + "): the window cannot be computed from weights and KV, only reported")
+    warnings += _shape_warnings(inputs.footprint)
+    warnings += _fit_warnings(inputs.fit)
+    warnings += _pilot_and_host_warnings(inputs.pilot, inputs.host)
+    warnings += _value_warnings(inputs, decisions)
+    return warnings
+
+
+def _shape_warnings(footprint: Footprint) -> list[str]:
+    """What an incomplete model shape costs: an honest window, reported rather than computed."""
+    if footprint.known:
+        return []
+    return ["model shape is incomplete ("
+            + ", ".join(footprint.missing)
+            + "): the window cannot be computed from weights and KV, only reported"]
+
+
+def _fit_warnings(fit: Fit) -> list[str]:
+    """What the fit itself says about the host that has to carry this model."""
+    warnings = []
     if fit.window_is_limited:
         warnings.append(f"the standard window does not fit: {fit.reason}")
     elif fit.estimate:
         warnings.append(f"placement is the engine's call: {fit.reason}")
     if not fit.fits:
         warnings.append(f"this model will not run here: {fit.reason}")
+    return warnings
+
+
+def _pilot_and_host_warnings(pilot: PilotResult, host: HostFacts) -> list[str]:
+    """The two things that move under the run: an unmeasured rate and other tenants' VRAM."""
+    warnings = []
     if not pilot.usable:
         warnings.append("the pilot never measured a rate, so every budget falls back to the "
                         "standard floor and the run may overrun")
@@ -982,13 +1074,16 @@ def plan_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
         warnings.append(f"{len(host.compute_apps)} other compute process(es) hold VRAM on this "
                         "host; the fit counts it against this run, and the figure will move "
                         "under load")
-    covered = {decision.variable.partition(":")[0] for decision in decisions}
-    for variable in inputs.variables:
-        if not variable.is_measurement or variable.id in covered:
-            continue
-        if any(variable.applies_to_leg(planned.id) for planned in inputs.planned):
-            warnings.append(f"measurement variable {variable.id} has no value on this plan")
     return warnings
+
+
+def _value_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
+    """A measurement variable a planned leg uses, which no row on this plan answers."""
+    covered = {decision.variable.partition(":")[0] for decision in decisions}
+    return [f"measurement variable {variable.id} has no value on this plan"
+            for variable in inputs.variables
+            if variable.is_measurement and variable.id not in covered
+            and any(variable.applies_to_leg(planned.id) for planned in inputs.planned)]
 
 
 def serving_warnings(host: HostFacts, footprint: Footprint,
@@ -1005,6 +1100,31 @@ def serving_warnings(host: HostFacts, footprint: Footprint,
             f"this run as the model under test; anything else on the card is not"]
 
 
+def _selected_legs(legs: list[Leg], selected: tuple[str, ...]) -> list[Leg]:
+    """The legs this run plans, or every leg when the operator named none."""
+    return [leg for leg in legs if not selected or leg.id in selected]
+
+
+def _thinking_request(profile: dict) -> str:
+    """The thinking switch the profile asks for, or the standard's when it asks nothing valid."""
+    request = str(profile.get("thinking") or THINKING_STANDARD)
+    return request if request in THINKING_CHOICES else THINKING_STANDARD
+
+
+def _plan_decisions(inputs: _PlanInputs, ctx_decision: Decision | None,
+                    leg_decisions: list[Decision]) -> list[Decision]:
+    """Every row on the sheet: the window question, the legs', the host's, then the knobs'."""
+    decisions = ([ctx_decision] if ctx_decision else []) + leg_decisions
+    decisions.extend(capacity_decisions(inputs))
+    decisions.extend(measurement_decisions(inputs))
+    return _with_effects(decisions, inputs)
+
+
+def _model_name(profile: dict) -> str:
+    """The name the sheet leads with: the profile's id, its name, or an honest placeholder."""
+    return str(profile.get("id") or profile.get("name") or "unnamed-model")
+
+
 def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile: dict,
              host: HostFacts, server: ServerFacts, pilot: PilotResult,
              judge: Judge | None = None, selected: tuple[str, ...] = (),
@@ -1014,13 +1134,11 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
              serving_pid: int | None = None,
              engine: EngineFacts | None = None) -> RunPlan:
     """Build the plan: fit, window, per-leg caps, decisions, warnings and the stamp."""
-    chosen = [leg for leg in legs if not selected or leg.id in selected]
+    chosen = _selected_legs(legs, selected)
     fit, footprint = compute_plan_fit(profile, standard, host, model_shape, serving_pid)
     largest_cap = max((resolve_cap(leg, standard) for leg in chosen), default=0)
     ctx, ctx_decision = plan_ctx(standard, fit, footprint, largest_cap)
-    request = str(profile.get("thinking") or THINKING_STANDARD)
-    if request not in THINKING_CHOICES:
-        request = THINKING_STANDARD
+    request = _thinking_request(profile)
     planned, skips, leg_decisions = plan_legs(chosen, standard, ctx, request, server, host,
                                               judge, pilot)
     engine_facts = engine if engine is not None else EngineFacts()
@@ -1030,13 +1148,10 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
                          ctx=ctx, ctx_asked=ctx_decision is not None,
                          caps={item.id: item.cap for item in planned},
                          planned=tuple(planned))
-    decisions = ([ctx_decision] if ctx_decision else []) + leg_decisions
-    decisions.extend(capacity_decisions(inputs))
-    decisions.extend(measurement_decisions(inputs))
-    decisions = _with_effects(decisions, inputs)
+    decisions = _plan_decisions(inputs, ctx_decision, leg_decisions)
     return RunPlan(
         standard_version=str(standard.get("standard_version", "unknown")),
-        model=str(profile.get("id") or profile.get("name") or "unnamed-model"),
+        model=_model_name(profile),
         fit=fit, legs=tuple(planned), decisions=tuple(decisions), skips=tuple(skips),
         warnings=tuple(plan_warnings(inputs, decisions)
                        + serving_warnings(host, footprint, serving_pid)),

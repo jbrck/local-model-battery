@@ -352,33 +352,30 @@ def status_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    resolve_judge(args)
+def _early_exit(args: argparse.Namespace) -> int | None:
+    """The read-only commands that answer and leave the run directory alone."""
     if args.status:
         return status_report(args)
     if args.detach:
         return detach_run(args)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    timer = start_timer()
-    plan, host, server, pilot = load_plan(args)
-    print(plan.render())
-    if args.dry_run:
-        print("\ndry run: nothing was started")
-        return 0
+    return None
+
+
+def _run_for_real(plan: RunPlan, args: argparse.Namespace, probes, timer: float,
+                  root: str) -> int:
+    """Everything after the plan is rendered: gate, manifest, every leg, the verdict."""
     if not args.out:
         print("\n--out is required for a real run", file=sys.stderr)
         return 2
-
     out_dir = Path(args.out).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    checks = gate(plan, args, (host, server, pilot))
+    host, server, pilot = probes
+    checks = gate(plan, args, probes)
     misses = preflight.blocked(checks)
     if misses:
         print(f"\npreflight blocked: {', '.join(check.name for check in misses)}",
               file=sys.stderr)
         return 1
-
     manifest.start(out_dir, plan, host, server, resume=args.resume)
     (out_dir / "run-plan.json").write_text(json.dumps(plan.to_dict(), indent=2) + "\n")
     results = run_all(plan, args, out_dir, root)
@@ -389,6 +386,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"stamp": plan.stamp_line, "results": results}, indent=2))
     return verdict(plan, results, args.strict)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    resolve_judge(args)
+    early = _early_exit(args)
+    if early is not None:
+        return early
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    timer = start_timer()
+    plan, host, server, pilot = load_plan(args)
+    print(plan.render())
+    if args.dry_run:
+        print("\ndry run: nothing was started")
+        return 0
+    return _run_for_real(plan, args, (host, server, pilot), timer, root)
 
 
 if __name__ == "__main__":

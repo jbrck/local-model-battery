@@ -190,24 +190,44 @@ def _check_prereqs(leg: Leg) -> list[str]:
     ]
 
 
-def _check_interpreter(leg: Leg) -> list[str]:
-    """A declared interpreter is how a leg borrows another venv's dependencies.
+def _check_interpreter_path(leg: Leg) -> list[str]:
+    """A borrowed interpreter is named by an absolute path, never a relative one.
 
-    It has to be absolute: the orchestrator runs legs from its own working directory, so a
-    relative interpreter would resolve to whatever directory that happens to be.
+    The orchestrator runs legs from its own working directory, so a relative interpreter
+    would resolve to whatever directory that happens to be.
     """
-    problems = []
     if leg.interpreter and not leg.interpreter.startswith("/"):
-        problems.append(f"{leg.id}: interpreter {leg.interpreter!r} must be an absolute path")
+        return [f"{leg.id}: interpreter {leg.interpreter!r} must be an absolute path"]
+    return []
+
+
+def _check_interpreter_env(leg: Leg) -> list[str]:
+    """The variable name has to be a variable name, and imports need one to resolve against."""
+    problems = []
     if leg.interpreter_env and not INTERPRETER_ENV_PATTERN.match(leg.interpreter_env):
         problems.append(f"{leg.id}: interpreter_env {leg.interpreter_env!r} must be an "
                         f"environment variable name like LCB_PYTHON")
     if leg.interpreter_imports and not leg.interpreter_env:
         problems.append(f"{leg.id}: interpreter_imports needs an interpreter_env to resolve "
                         f"against")
-    for name in leg.interpreter_imports:
-        if not IMPORT_NAME_PATTERN.match(name):
-            problems.append(f"{leg.id}: interpreter_imports entry {name!r} is not a module name")
+    return problems
+
+
+def _check_import_names(leg: Leg) -> list[str]:
+    """Every declared import has to be a real dotted module name."""
+    return [
+        f"{leg.id}: interpreter_imports entry {name!r} is not a module name"
+        for name in leg.interpreter_imports
+        if not IMPORT_NAME_PATTERN.match(name)
+    ]
+
+
+def _check_interpreter(leg: Leg) -> list[str]:
+    """A declared interpreter is how a leg borrows another venv's dependencies."""
+    problems = []
+    problems.extend(_check_interpreter_path(leg))
+    problems.extend(_check_interpreter_env(leg))
+    problems.extend(_check_import_names(leg))
     return problems
 
 

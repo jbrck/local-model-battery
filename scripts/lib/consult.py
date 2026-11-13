@@ -206,18 +206,35 @@ def engine_row(engine_id: str, engines: dict[str, dict]) -> dict:
     return engines[engine_id]
 
 
+def _serves_gguf(engine_id: str) -> bool:
+    """The engines whose rows say they consume GGUF weights."""
+    return engine_id in GGUF_ENGINES
+
+
+def _serves_hf(engine_id: str) -> bool:
+    """The engines whose rows say they load directory weights, proxy excluded."""
+    return engine_id not in GGUF_ENGINES and engine_id != PROXY_ENGINE
+
+
+def _serves_any(engine_id: str) -> bool:
+    """An unknown shape rules nothing out but the proxy, which is not an engine."""
+    return engine_id != PROXY_ENGINE
+
+
+_CANDIDATE_FILTERS = {
+    SOURCE_GGUF: _serves_gguf,
+    SOURCE_HF: _serves_hf,
+}
+
+
 def engine_candidates(source: str, engine_ids: tuple[str, ...]) -> tuple[str, ...]:
     """The engines that could serve this model file, from what their rows say.
 
     A GGUF-shaped model goes to the engines whose rows consume GGUF; a HF-shaped one goes
     to the rest. An unknown shape rules nothing out. The operating system is never asked.
     """
-    if source == SOURCE_GGUF:
-        return tuple(engine_id for engine_id in engine_ids if engine_id in GGUF_ENGINES)
-    if source == SOURCE_HF:
-        return tuple(engine_id for engine_id in engine_ids
-                     if engine_id not in GGUF_ENGINES and engine_id != PROXY_ENGINE)
-    return tuple(engine_id for engine_id in engine_ids if engine_id != PROXY_ENGINE)
+    serves = _CANDIDATE_FILTERS.get(source, _serves_any)
+    return tuple(engine_id for engine_id in engine_ids if serves(engine_id))
 
 
 def detect_model_types(shape: ModelShape) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -251,16 +268,23 @@ def judge_candidates(model_ids: tuple[str, ...], under_test: set[str],
                  if model_id and model_id not in under_test)
 
 
+def _model_ids(payload: object) -> tuple[str, ...] | None:
+    """The ids in a well-formed model list, or None when the payload is not one."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    return tuple(str(entry.get("id")) for entry in data
+                 if isinstance(entry, dict) and entry.get("id"))
+
+
 def fetch_model_ids(cfg: ModelConfig) -> tuple[tuple[str, ...], str | None]:
     """The endpoint's model list, or the reason there is none."""
     _, payload, error = get_json(cfg.models_url, cfg.api_key)
     if error:
         return (), error
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
+    ids = _model_ids(payload)
+    if ids is None:
         return (), "the model list is not a JSON array of entries"
-    ids = tuple(str(entry.get("id")) for entry in data
-                if isinstance(entry, dict) and entry.get("id"))
     return ids, None if ids else "the model list is empty"
 
 
@@ -309,35 +333,50 @@ def _unknown_line(what: str, resolution: str) -> str:
     return f"- {what}: unknown -- {resolution}"
 
 
-def render_host(host: HostFacts) -> str:
-    """Section 1: the host's facts, each naming its source. Presence, not a verdict."""
-    lines: list[str] = []
-    if host.gpus:
-        for gpu in host.gpus:
-            lines.append(
-                f"- accelerator {gpu.index}: {gpu.name}, {gpu.vram_total_gb:.1f} GB total, "
-                f"{gpu.vram_free_mb / 1024:.1f} GB free (source: nvidia-smi --query-gpu)")
-    else:
+def _accelerator_lines(host: HostFacts) -> list[str]:
+    """One line per card, or the reason nvidia-smi gave nothing."""
+    if not host.gpus:
         reason = host.gpu_error or "no accelerator facts were reported"
-        lines.append(_unknown_line(
+        return [_unknown_line(
             "accelerators", f"{reason} (source: nvidia-smi --query-gpu); a working driver "
-            "or an installed nvidia-smi would resolve it"))
-    if host.ram_total_gb is not None:
-        memory = f"- memory: {host.ram_total_gb} GB total"
-        if host.ram_available_gb is not None:
-            memory += f", {host.ram_available_gb} GB available"
-        if host.swap_used_gb:
-            memory += f", {host.swap_used_gb} GB swap in use"
-        lines.append(f"{memory} (source: /proc/meminfo)")
-    else:
-        lines.append(_unknown_line("memory", "/proc/meminfo is not readable on this host"))
-    if host.cpu_model or host.cpu_threads:
-        model = host.cpu_model or "model not reported"
-        lines.append(f"- cpu: {model}, {host.cpu_threads} threads (source: /proc/cpuinfo)")
-    else:
-        lines.append(_unknown_line("cpu", "/proc/cpuinfo is not readable on this host"))
-    if host.numa_nodes:
-        lines.append(f"- numa nodes: {host.numa_nodes} (source: /sys/devices/system/node)")
+            "or an installed nvidia-smi would resolve it")]
+    return [
+        f"- accelerator {gpu.index}: {gpu.name}, {gpu.vram_total_gb:.1f} GB total, "
+        f"{gpu.vram_free_mb / 1024:.1f} GB free (source: nvidia-smi --query-gpu)"
+        for gpu in host.gpus
+    ]
+
+
+def _memory_lines(host: HostFacts) -> list[str]:
+    """The memory line with its optional available and swap parts, or unknown."""
+    if host.ram_total_gb is None:
+        return [_unknown_line("memory", "/proc/meminfo is not readable on this host")]
+    memory = f"- memory: {host.ram_total_gb} GB total"
+    if host.ram_available_gb is not None:
+        memory += f", {host.ram_available_gb} GB available"
+    if host.swap_used_gb:
+        memory += f", {host.swap_used_gb} GB swap in use"
+    return [f"{memory} (source: /proc/meminfo)"]
+
+
+def _cpu_lines(host: HostFacts) -> list[str]:
+    """The cpu line, or unknown when /proc/cpuinfo gave neither model nor threads."""
+    if not (host.cpu_model or host.cpu_threads):
+        return [_unknown_line("cpu", "/proc/cpuinfo is not readable on this host")]
+    model = host.cpu_model or "model not reported"
+    return [f"- cpu: {model}, {host.cpu_threads} threads (source: /proc/cpuinfo)"]
+
+
+def _numa_lines(host: HostFacts) -> list[str]:
+    """The numa line, present only when the kernel exposes more than one node."""
+    if not host.numa_nodes:
+        return []
+    return [f"- numa nodes: {host.numa_nodes} (source: /sys/devices/system/node)"]
+
+
+def _tool_lines(host: HostFacts) -> list[str]:
+    """One line per external tool, present with its version or absent with the cost."""
+    lines: list[str] = []
     for tool in host.tools:
         if tool.available:
             version = f", reports {tool.version}" if tool.version else ""
@@ -346,63 +385,87 @@ def render_host(host: HostFacts) -> str:
         else:
             lines.append(f"- tool {tool.name}: absent -- any leg that needs it is skipped "
                          "with the reason, never a crash (source: PATH lookup)")
+    return lines
+
+
+def render_host(host: HostFacts) -> str:
+    """Section 1: the host's facts, each naming its source. Presence, not a verdict."""
+    lines = (_accelerator_lines(host) + _memory_lines(host) + _cpu_lines(host)
+             + _numa_lines(host) + _tool_lines(host))
     return "\n".join(lines)
+
+
+def _unknown_shape_lines(shape: ModelShape) -> list[str]:
+    """The shape section when nothing could be read, with each problem named."""
+    lines = ["- shape: unknown -- a model file (--model-file or --model-dir), or a "
+             "running engine that reports the model path it loaded, would resolve it"]
+    lines.extend(f"- problem: {problem}" for problem in shape.problems)
+    return lines
+
+
+def _known_shape_lines(shape: ModelShape) -> list[str]:
+    """The shape section when the model was read: numbers, then notes and problems."""
+    lines = [
+        f"- source: {shape.source} ({shape.path or 'no path on record'})",
+        f"- architecture: {shape.arch or 'not stated'}",
+        f"- layers that hold a growing cache: {shape.n_layers}",
+        f"- kv heads: {shape.n_kv_heads}, head_dim: {shape.head_dim}",
+        f"- weights: {shape.weights_bytes / 1024 ** 3:.1f} GB",
+    ]
+    if shape.native_ctx:
+        lines.append(f"- declared window: {shape.native_ctx} tokens")
+    else:
+        lines.append(_unknown_line("declared window",
+                                   "the model metadata does not state one"))
+    lines.append(f"- cache cost: {shape.kv_elements_per_token} elements per token of "
+                 f"window, {shape.kv_fixed_elements} elements that do not grow")
+    lines.extend(f"- note: {note}" for note in shape.notes)
+    lines.extend(f"- problem: {problem}" for problem in shape.problems)
+    return lines
+
+
+def _matched_type_lines(matched: tuple[str, ...], model_types: dict[str, dict]) -> list[str]:
+    """The matched model types with their table rows, or a loud failure on a missing row."""
+    lines: list[str] = []
+    if not matched:
+        return lines
+    lines.append("Model type, matched against model-types.toml:")
+    for type_id in matched:
+        row = model_types.get(type_id)
+        if row is None:
+            raise MissingKnowledge(
+                f"model-types.toml has no row for {type_id!r}; known ids: "
+                f"{', '.join(sorted(model_types)) or 'none'}")
+        lines.append(f"- `{type_id}`: {row.get('effect', '')}")
+        lines.append(f"  records: {row.get('advice', '')}")
+    return lines
 
 
 def render_model(shape: ModelShape, model_types: dict[str, dict]) -> str:
     """Section 2: the shape, the source it came from, and the model types it matches."""
-    lines: list[str] = []
-    if not shape.known:
-        lines.append("- shape: unknown -- a model file (--model-file or --model-dir), or a "
-                     "running engine that reports the model path it loaded, would resolve it")
-        for problem in shape.problems:
-            lines.append(f"- problem: {problem}")
+    if shape.known:
+        lines = _known_shape_lines(shape)
     else:
-        lines.append(f"- source: {shape.source} ({shape.path or 'no path on record'})")
-        lines.append(f"- architecture: {shape.arch or 'not stated'}")
-        lines.append(f"- layers that hold a growing cache: {shape.n_layers}")
-        lines.append(f"- kv heads: {shape.n_kv_heads}, head_dim: {shape.head_dim}")
-        lines.append(f"- weights: {shape.weights_bytes / 1024 ** 3:.1f} GB")
-        if shape.native_ctx:
-            lines.append(f"- declared window: {shape.native_ctx} tokens")
-        else:
-            lines.append(_unknown_line("declared window",
-                                       "the model metadata does not state one"))
-        lines.append(f"- cache cost: {shape.kv_elements_per_token} elements per token of "
-                     f"window, {shape.kv_fixed_elements} elements that do not grow")
-        for note in shape.notes:
-            lines.append(f"- note: {note}")
-        for problem in shape.problems:
-            lines.append(f"- problem: {problem}")
-
+        lines = _unknown_shape_lines(shape)
     matched, _unresolved = detect_model_types(shape)
-    if matched:
-        lines.append("Model type, matched against model-types.toml:")
-        for type_id in matched:
-            row = model_types.get(type_id)
-            if row is None:
-                raise MissingKnowledge(
-                    f"model-types.toml has no row for {type_id!r}; known ids: "
-                    f"{', '.join(sorted(model_types)) or 'none'}")
-            lines.append(f"- `{type_id}`: {row.get('effect', '')}")
-            lines.append(f"  records: {row.get('advice', '')}")
+    lines.extend(_matched_type_lines(matched, model_types))
     for unresolved_id, resolution in UNRESOLVED_MODEL_TYPES:
         lines.append(f"- model type `{unresolved_id}`: unknown -- {resolution}")
     return "\n".join(lines)
 
 
-def _engine_fact_lines(facts: object) -> list[str]:
-    """The measured engine facts, whatever the engine-facts probe came back with."""
-    known = bool(getattr(facts, "known", False))
-    lines: list[str] = []
-    if not known:
-        errors = "; ".join(getattr(facts, "errors", ()) or ("nothing was tried",))
-        lines.append(_unknown_line(
-            "engine", f"nothing behind the endpoint identified itself ({errors}); a server "
-            "that answers /props, /api/show, /version or /models would resolve it"))
-        return lines
-    lines.append(f"- engine: {getattr(facts, 'engine', 'unknown')} (identified by the "
-                 f"{getattr(facts, 'source', '')} probe)")
+def _unknown_engine_lines(facts: object) -> list[str]:
+    """The section when nothing behind the endpoint identified itself."""
+    errors = "; ".join(getattr(facts, "errors", ()) or ("nothing was tried",))
+    return [_unknown_line(
+        "engine", f"nothing behind the endpoint identified itself ({errors}); a server "
+        "that answers /props, /api/show, /version or /models would resolve it")]
+
+
+def _engine_detail_lines(facts: object) -> list[str]:
+    """The identity line and each optional fact the engine actually published."""
+    lines = [f"- engine: {getattr(facts, 'engine', 'unknown')} (identified by the "
+             f"{getattr(facts, 'source', '')} probe)"]
     version = getattr(facts, "version", "") or "build not reported"
     lines.append(f"- version: {version}")
     window = getattr(facts, "window", None)
@@ -423,17 +486,28 @@ def _engine_fact_lines(facts: object) -> list[str]:
     drafter = getattr(facts, "drafter", None)
     if drafter:
         lines.append(f"- drafter: {drafter}")
+    return lines
+
+
+def _engine_error_lines(facts: object) -> list[str]:
+    """The probe errors, folded into one line when the engine was identified before them.
+
+    Probes this engine does not serve are not failures. Four 404s out of a working
+    router read as a broken endpoint, and this brief gets read once.
+    """
     errors = tuple(getattr(facts, "errors", ()) or ())
     engine = str(getattr(facts, "engine", "") or "")
     if errors and engine not in ("", "unknown"):
-        # Probes this engine does not serve are not failures. Four 404s out of a working
-        # router read as a broken endpoint, and this brief gets read once.
-        lines.append(f"- {len(errors)} other probes were not served; the engine was "
-                     "identified before them")
-    else:
-        for error in errors:
-            lines.append(f"- probe error: {error}")
-    return lines
+        return [f"- {len(errors)} other probes were not served; the engine was "
+                "identified before them"]
+    return [f"- probe error: {error}" for error in errors]
+
+
+def _engine_fact_lines(facts: object) -> list[str]:
+    """The measured engine facts, whatever the engine-facts probe came back with."""
+    if not getattr(facts, "known", False):
+        return _unknown_engine_lines(facts)
+    return (_engine_detail_lines(facts) + _engine_error_lines(facts))
 
 
 def render_engine(inputs: BriefInputs, engines: dict[str, dict]) -> str:
@@ -481,17 +555,37 @@ def _call_verdict(fit: Fit | None, facts: object | None, preferred_ctx: int) -> 
             f"{fit.reason}; the window is unknown until the smoke check reads it")
 
 
+def _fit_lines(fit: Fit | None) -> list[str]:
+    """The fit line and its estimate caveat, or unknown when there is no shape to fit."""
+    if fit is None:
+        return [_unknown_line("fit", "no model shape; --model-file or --model-dir "
+                                     "would resolve it")]
+    lines = [f"- fit: {fit.verdict} -- {fit.reason}"]
+    if fit.estimate:
+        lines.append("- the fit is an estimate; placement is the engine's call")
+    return lines
+
+
+def _engine_row_lines(inputs: BriefInputs, engines: dict[str, dict], row_id: str) -> list[str]:
+    """What the engines.toml row says this engine does, or unknown without a row."""
+    if row_id not in engines:
+        return [_unknown_line(
+            "engine behaviour", "no engines.toml row for this engine; --engine <id> or an "
+            "engine that identifies itself would resolve it")]
+    row = engines[row_id]
+    lines = [f"- what {row_id} does to the numbers: {row.get('effect', '')}",
+             f"- comparable to: {row.get('compares_to', '')}"]
+    if inputs.engine_facts is not None and not getattr(inputs.engine_facts,
+                                                       "supports_kv_flags", True):
+        lines.append("- the KV cache is not a knob on this engine; the plan records "
+                     "kv_type as n/a rather than dropping the row")
+    return lines
+
+
 def render_call(inputs: BriefInputs, fit: Fit | None, engines: dict[str, dict],
                 preferred_ctx: int) -> str:
     """Section 4: whether this combination is worth testing, with the reason. Never silent."""
-    lines: list[str] = []
-    if fit is not None:
-        lines.append(f"- fit: {fit.verdict} -- {fit.reason}")
-        if fit.estimate:
-            lines.append("- the fit is an estimate; placement is the engine's call")
-    else:
-        lines.append(_unknown_line("fit", "no model shape; --model-file or --model-dir "
-                                          "would resolve it"))
+    lines = _fit_lines(fit)
     window = getattr(inputs.engine_facts, "window", None) if inputs.engine_facts else None
     if window:
         lines.append(f"- window: the engine serves {window} tokens against the standard's "
@@ -502,18 +596,7 @@ def render_call(inputs: BriefInputs, fit: Fit | None, engines: dict[str, dict],
     row_id = inputs.engine_id
     if not row_id and inputs.engine_facts is not None:
         row_id = getattr(inputs.engine_facts, "engine", "")
-    if row_id in engines:
-        row = engines[row_id]
-        lines.append(f"- what {row_id} does to the numbers: {row.get('effect', '')}")
-        lines.append(f"- comparable to: {row.get('compares_to', '')}")
-        if inputs.engine_facts is not None and not getattr(inputs.engine_facts,
-                                                           "supports_kv_flags", True):
-            lines.append("- the KV cache is not a knob on this engine; the plan records "
-                         "kv_type as n/a rather than dropping the row")
-    else:
-        lines.append(_unknown_line(
-            "engine behaviour", "no engines.toml row for this engine; --engine <id> or an "
-            "engine that identifies itself would resolve it"))
+    lines.extend(_engine_row_lines(inputs, engines, row_id))
     lines.append(f"- the call: {_call_verdict(fit, inputs.engine_facts, preferred_ctx)}")
     return "\n".join(lines)
 
@@ -549,30 +632,60 @@ def render_decisions(inputs: BriefInputs, use_cases: dict[str, dict],
     return "\n".join(lines)
 
 
+def _candidate_marker(candidate: str, pinned_model: str, judge_pick: str) -> str:
+    """The annotation after a candidate; the operator's pick outranks the pin."""
+    if candidate == judge_pick:
+        return " (you named this one)"
+    if candidate == pinned_model:
+        return " (the pinned default)"
+    return ""
+
+
+def _candidate_lines(candidates: tuple[tuple[str, bool], ...], pinned_model: str,
+                     judge_pick: str) -> list[str]:
+    """Each candidate with its marker, or the unknown that says why the list is empty."""
+    lines: list[str] = []
+    if candidates:
+        lines.append("Candidates from this endpoint's model list:")
+        for candidate, _is_pin in candidates:
+            lines.append(f"- {candidate}"
+                         f"{_candidate_marker(candidate, pinned_model, judge_pick)}")
+    else:
+        lines.append(_unknown_line("candidates", "every model this endpoint lists is "
+                                                 "under test"))
+    return lines
+
+
+def _exclusion_lines(inputs: BriefInputs, candidates: tuple[tuple[str, bool], ...],
+                     under_test: set[str], pinned_model: str) -> list[str]:
+    """Who was left out, and what the pin needs that this endpoint does not serve."""
+    excluded = [model_id for model_id in inputs.model_ids
+                if model_id and model_id in under_test]
+    served = [candidate for candidate, _is_pin in candidates]
+    lines: list[str] = []
+    if excluded:
+        lines.append(f"Excluded, because they are under test: {', '.join(excluded)}")
+    if pinned_model != "none" and pinned_model not in served:
+        lines.append(f"The pinned default {pinned_model} is not in this endpoint's "
+                     "list; picking it needs an endpoint that serves it.")
+    return lines
+
+
+def _endpoint_candidate_lines(inputs: BriefInputs, pinned_model: str) -> list[str]:
+    """The candidates from a live endpoint's model list, and who was excluded and why."""
+    under_test = {name for name in (inputs.model_name,) if name}
+    candidates = judge_candidates(inputs.model_ids, under_test)
+    return (_candidate_lines(candidates, pinned_model, inputs.judge_pick)
+            + _exclusion_lines(inputs, candidates, under_test, pinned_model))
+
+
 def render_judge(inputs: BriefInputs, pin: dict) -> str:
     """Section 6: the judge candidates, the pinned default named out loud, the user picks."""
     pinned_model = str(pin.get("model", "") or "none")
     lines = [f"The standard pins {pinned_model} as the default judge (standard.toml "
              f"[judge]); the user picks, and nothing here chooses one."]
     if inputs.model_ids:
-        under_test = {name for name in (inputs.model_name,) if name}
-        candidates = judge_candidates(inputs.model_ids, under_test)
-        excluded = [model_id for model_id in inputs.model_ids
-                    if model_id and model_id in under_test]
-        if candidates:
-            lines.append("Candidates from this endpoint's model list:")
-            for candidate, _is_pin in candidates:
-                marker = " (the pinned default)" if candidate == pinned_model else ""
-                marker = " (you named this one)" if candidate == inputs.judge_pick else marker
-                lines.append(f"- {candidate}{marker}")
-        else:
-            lines.append(_unknown_line("candidates", "every model this endpoint lists is "
-                                                     "under test"))
-        if excluded:
-            lines.append(f"Excluded, because they are under test: {', '.join(excluded)}")
-        if pinned_model != "none" and pinned_model not in [c for c, _ in candidates]:
-            lines.append(f"The pinned default {pinned_model} is not in this endpoint's "
-                         "list; picking it needs an endpoint that serves it.")
+        lines.extend(_endpoint_candidate_lines(inputs, pinned_model))
     else:
         lines.append(_unknown_line("candidates", "no endpoint is up; an endpoint whose "
                                                  "model list answers would resolve it"))
@@ -587,31 +700,35 @@ def render_judge(inputs: BriefInputs, pin: dict) -> str:
     return "\n".join(lines)
 
 
-def render_smoke(inputs: BriefInputs, engines: dict[str, dict]) -> str:
-    """Section 7: the engine's smoke check made concrete, or the setup checklist."""
-    row_id = inputs.engine_id
-    if not row_id and inputs.engine_facts is not None:
-        row_id = getattr(inputs.engine_facts, "engine", "")
-    lines: list[str] = []
-    if not inputs.endpoint:
-        lines.append("Nothing is up yet, so this is the setup checklist:")
-        if row_id in engines:
-            row = engines[row_id]
-            lines.append(f"1. Stand the engine up: {row.get('serve', '')}")
-            lines.append(f"2. Prove it is up and read the real window: {row.get('smoke', '')}")
-        else:
-            lines.append("1. Pick an engine (--engine <id>); the checklist needs its serve "
-                         "and smoke lines.")
-            return "\n".join(lines)
-        lines.append("3. Stop and fix the setup instead of running when any of these hold:")
-        for condition in SMOKE_STOP_CONDITIONS:
-            lines.append(f"   - {condition}")
-        return "\n".join(lines)
+def _smoke_row_id(inputs: BriefInputs) -> str:
+    """The engine row the smoke section reads: the flag, or the identified engine."""
+    if inputs.engine_id:
+        return inputs.engine_id
+    if inputs.engine_facts is not None:
+        return getattr(inputs.engine_facts, "engine", "")
+    return ""
 
-    base = base_url(inputs.endpoint)
+
+def _checklist_lines(engines: dict[str, dict], row_id: str) -> str:
+    """The setup checklist when nothing is up: stand up, smoke, and when to stop."""
+    lines = ["Nothing is up yet, so this is the setup checklist:"]
+    if row_id not in engines:
+        lines.append("1. Pick an engine (--engine <id>); the checklist needs its serve "
+                     "and smoke lines.")
+        return "\n".join(lines)
+    row = engines[row_id]
+    lines.append(f"1. Stand the engine up: {row.get('serve', '')}")
+    lines.append(f"2. Prove it is up and read the real window: {row.get('smoke', '')}")
+    lines.append("3. Stop and fix the setup instead of running when any of these hold:")
+    lines.extend(f"   - {condition}" for condition in SMOKE_STOP_CONDITIONS)
+    return "\n".join(lines)
+
+
+def _live_smoke_lines(inputs: BriefInputs, engines: dict[str, dict], row_id: str) -> str:
+    """The smoke section for a live endpoint: the table's line, made concrete."""
+    lines: list[str] = []
     if row_id in engines:
-        row = engines[row_id]
-        lines.append(f"From engines.toml: {row.get('smoke', '')}")
+        lines.append(f"From engines.toml: {engines[row_id].get('smoke', '')}")
     else:
         lines.append(_unknown_line("smoke line", "no engines.toml row for this engine"))
     concrete = SMOKE_CONCRETE.get(row_id)
@@ -620,12 +737,20 @@ def render_smoke(inputs: BriefInputs, engines: dict[str, dict]) -> str:
             "concrete smoke request", f"no smoke recipe for {row_id!r} in the brief"))
     else:
         request, passes = concrete
+        base = base_url(inputs.endpoint)
         lines.append(f"- what to send: {request.format(base=base)}")
         lines.append(f"- a pass looks like: {passes}")
     lines.append("Stop and fix the setup instead of running when any of these hold:")
-    for condition in SMOKE_STOP_CONDITIONS:
-        lines.append(f"- {condition}")
+    lines.extend(f"- {condition}" for condition in SMOKE_STOP_CONDITIONS)
     return "\n".join(lines)
+
+
+def render_smoke(inputs: BriefInputs, engines: dict[str, dict]) -> str:
+    """Section 7: the engine's smoke check made concrete, or the setup checklist."""
+    row_id = _smoke_row_id(inputs)
+    if not inputs.endpoint:
+        return _checklist_lines(engines, row_id)
+    return _live_smoke_lines(inputs, engines, row_id)
 
 
 def lineup_command(model: str, endpoint: str, model_file: str, model_dir: str,

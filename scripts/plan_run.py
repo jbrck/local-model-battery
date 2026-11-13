@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
-from scripts.lib.engine_facts import probe_engine  # noqa: E402
+from scripts.lib.engine_facts import EngineFacts, probe_engine  # noqa: E402
 from scripts.lib.env_probe import probe_host, serving_pid_for  # noqa: E402
 from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
@@ -85,27 +85,48 @@ def probe_from_args(args: argparse.Namespace):
     standard = load_toml(STANDARD_FILE)
     legs = load_legs(standard)
     variables = load_variables()
-    profile = load_toml(args.profile) if args.profile else {}
-    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
-    profile.setdefault("id", fallback)
+    profile = _profile_from_args(args)
     host = probe_host()
     cfg = ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
                       api_key=args.api_key)
     server, pilot = _probes(args, cfg)
     judge = _judge(args, cfg, standard)
-    # The shape comes from the model, not from the profile: the file the endpoint says it
-    # loaded, or the one named on the command line, or the profile as a last resort.
-    shape = resolve_model_shape(model_file=args.model_file, model_dir=args.model_dir,
-                                props=getattr(server, "props", None), profile=profile)
-    selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
-    # The process answering the endpoint is holding the model under test. Naming it lets the
-    # fit credit those weights to this run instead of counting them as someone else's.
-    pid = None if args.no_probe else serving_pid_for(args.endpoint)
-    # The engine is named by its probes, once, here: every stamp below reads from this plan.
-    engine = None if args.no_probe else probe_engine(cfg)
+    shape = _model_shape(args, server, profile)
+    selected = _selected(args.legs)
+    pid, engine = _endpoint_state(args, cfg)
     plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected,
                     model_shape=shape, serving_pid=pid, engine=engine)
     return plan, host, server, pilot
+
+
+def _profile_from_args(args: argparse.Namespace) -> dict:
+    """The profile TOML with its id filled in, or an empty one the probes can still name."""
+    profile = load_toml(args.profile) if args.profile else {}
+    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
+    profile.setdefault("id", fallback)
+    return profile
+
+
+def _model_shape(args: argparse.Namespace, server, profile: dict):
+    """The shape comes from the model, not from the profile: the file the endpoint says it
+    loaded, or the one named on the command line, or the profile as a last resort."""
+    return resolve_model_shape(model_file=args.model_file, model_dir=args.model_dir,
+                               props=getattr(server, "props", None), profile=profile)
+
+
+def _selected(legs_arg: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in legs_arg.split(",") if item.strip())
+
+
+def _endpoint_state(args: argparse.Namespace,
+                    cfg: ModelConfig) -> tuple[int | None, EngineFacts | None]:
+    """Who is serving the endpoint and which engine it is, unless probing was disabled."""
+    if args.no_probe:
+        return None, None
+    # The process answering the endpoint is holding the model under test. Naming it lets the
+    # fit credit those weights to this run instead of counting them as someone else's.
+    # The engine is named by its probes, once, here: every stamp below reads from this plan.
+    return serving_pid_for(args.endpoint), probe_engine(cfg)
 
 
 def plan_from_args(args: argparse.Namespace):

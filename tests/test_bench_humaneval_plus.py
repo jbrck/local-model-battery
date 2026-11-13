@@ -7,8 +7,9 @@ import unittest.mock
 
 from scripts.bench_humaneval_plus import candidate_source, strip_fences
 from scripts.bench_humaneval_plus import main as bench_main
-from scripts.bench_humaneval_plus import run_humaneval
-from scripts.lib.harness import LegArgs, Tally
+from scripts.bench_humaneval_plus import _replay_item, run_humaneval
+from scripts.lib.harness import LegArgs, Tally, case_record
+from scripts.lib.model import ChatResponse
 from tests.stub_json import DieAfter, FakeAsk
 
 PROMPT = "def add_two(a, b):\n    \"\"\"Return the sum.\"\"\"\n"
@@ -182,6 +183,39 @@ class CheckpointTest(unittest.TestCase):
                     "runaway", "timeout_hits", "failed", "tokens", "elapsed_s",
                     "status"):
             self.assertEqual(resumed_block[key], full_block[key], key)
+
+
+class ReplayItemTest(unittest.TestCase):
+    """A checkpointed case is counted again on replay, exactly as it first landed."""
+
+    def saved_case(self, **extra) -> dict:
+        """A checkpoint in the shape run_humaneval writes, with any extras applied."""
+        payload = {"choices": [{"finish_reason": "stop", "message": {"content": ""}}],
+                   "usage": {"completion_tokens": 50}}
+        response = ChatResponse(status=200, payload=payload, elapsed_s=1.0)
+        return case_record("00000", response, correct=False, **extra)
+
+    def test_a_plain_checkpoint_only_counts_itself(self) -> None:
+        tally = Tally()
+        _replay_item(tally, self.saved_case(), total=1, case_id="loop/1")
+        self.assertEqual(tally.items, 1)
+        self.assertEqual(tally.scored, 1)
+        self.assertEqual(tally.timeout_hits, 0)
+        self.assertEqual(tally.notes, [])
+
+    def test_a_checkpointed_exec_timeout_keeps_its_count_and_note(self) -> None:
+        saved = self.saved_case(exec_timeout=True,
+                                note="loop/1: execution timeout after 10s")
+        tally = Tally()
+        _replay_item(tally, saved, total=1, case_id="loop/1")
+        self.assertEqual(tally.timeout_hits, 1)
+        self.assertEqual(tally.notes, ["loop/1: execution timeout after 10s"])
+
+    def test_a_checkpoint_without_a_note_still_counts_the_timeout(self) -> None:
+        tally = Tally()
+        _replay_item(tally, self.saved_case(exec_timeout=True), total=1, case_id="loop/1")
+        self.assertEqual(tally.timeout_hits, 1)
+        self.assertEqual(tally.notes, [""])
 
 
 class TransportFailureTest(unittest.TestCase):

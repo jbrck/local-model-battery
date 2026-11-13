@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.legs import (  # noqa: E402
     Leg,
+    interpreter_hint,
     legs_by_id,
     load_legs,
     load_raw_legs,
@@ -194,6 +195,22 @@ class InterpreterTest(unittest.TestCase):
         choice = resolve_interpreter(make_leg(), {})
         self.assertEqual(choice.path, sys.executable)
         self.assertFalse(choice.borrowed)
+
+    def test_the_resolved_choice_reports_itself_as_a_dict(self):
+        leg, standard = self.lcb()
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": "/elsewhere/bin/python3"}):
+            payload = resolve_interpreter(leg, standard).to_dict()
+        self.assertEqual(payload["path"], "/elsewhere/bin/python3")
+        self.assertEqual(payload["source"], "environment")
+        self.assertEqual(payload["env_name"], "LCB_PYTHON")
+        self.assertEqual(payload["imports"], ["datasets"])
+        self.assertTrue(payload["borrowed"])
+
+    def test_a_leg_without_a_variable_gets_a_hint_to_declare_one(self):
+        leg = make_leg()
+        hint = interpreter_hint(leg, resolve_interpreter(leg, {}))
+        self.assertIn("declare an interpreter_env", hint)
+        self.assertIn("sample", hint)
 
     def test_a_relative_interpreter_is_reported(self):
         problems = validate_legs([make_leg(interpreter="python3")])

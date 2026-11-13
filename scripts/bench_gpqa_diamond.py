@@ -36,6 +36,51 @@ def grade(response: ChatResponse, gold: str) -> tuple[bool | None, str, str]:
     return predicted == gold, predicted, "content"
 
 
+def _replay_saved(saved: dict, index: int, total: int, rows: list[dict],
+                  tally: Tally) -> None:
+    """Count a checkpointed case again, without re-asking the model."""
+    row = saved["row"]
+    rows.append(row)
+    tally.record(replay_response(saved), correct=saved.get("correct"))
+    print(f"  [{index}/{total}] reused (gold={row['gold']}, "
+          f"got={row['predicted'] or '?'})", flush=True)
+
+
+def _fresh_case(cfg, args: LegArgs, item: dict, case_id: str, index: int, total: int,
+                rows: list[dict], tally: Tally) -> None:
+    """Ask one item, grade its letter, checkpoint the case and print its line."""
+    gold = extract_letter(item["answer"])
+    response = ask(cfg, [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": item["question"]},
+    ], args)
+    correct, predicted, channel = grade(response, gold)
+    tally.record(response, correct=correct)
+    row = {
+        "id": index - 1,
+        "gold": gold,
+        "predicted": predicted,
+        "passed": correct,
+        "channel": channel,
+        "cap_hit": response.ok and is_cap_hit(response),
+        "completion_tokens": response.completion_tokens,
+    }
+    rows.append(row)
+    write_case(args, LEG_ID, case_id,
+               case_record(case_id, response, correct=correct, row=row))
+    mark = "?" if correct is None else ("PASS" if correct else "FAIL")
+    print(f"  [{index}/{total}] {mark} (gold={gold}, got={predicted or '?'})"
+          f" ({response.elapsed_s:.1f}s)", flush=True)
+
+
+def _cap_note(tally: Tally) -> None:
+    """Cap hits change the letters, so the tally has to say so."""
+    if tally.cap_hits:
+        tally.notes.append(
+            f"{tally.cap_hits} answers stopped at the cap and their letters come "
+            "from truncated text")
+
+
 def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
     """Ask every item, checkpoint each case and tally the letter matches."""
     tally = Tally()
@@ -46,38 +91,10 @@ def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
         case_id = f"{index - 1:05d}"
         saved = load_case(args, LEG_ID, case_id)
         if saved is not None:
-            row = saved["row"]
-            rows.append(row)
-            tally.record(replay_response(saved), correct=saved.get("correct"))
-            print(f"  [{index}/{len(items)}] reused (gold={row['gold']}, "
-                  f"got={row['predicted'] or '?'})", flush=True)
+            _replay_saved(saved, index, len(items), rows, tally)
             continue
-        gold = extract_letter(item["answer"])
-        response = ask(cfg, [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": item["question"]},
-        ], args)
-        correct, predicted, channel = grade(response, gold)
-        tally.record(response, correct=correct)
-        row = {
-            "id": index - 1,
-            "gold": gold,
-            "predicted": predicted,
-            "passed": correct,
-            "channel": channel,
-            "cap_hit": response.ok and is_cap_hit(response),
-            "completion_tokens": response.completion_tokens,
-        }
-        rows.append(row)
-        write_case(args, LEG_ID, case_id,
-                   case_record(case_id, response, correct=correct, row=row))
-        mark = "?" if correct is None else ("PASS" if correct else "FAIL")
-        print(f"  [{index}/{len(items)}] {mark} (gold={gold}, got={predicted or '?'})"
-              f" ({response.elapsed_s:.1f}s)", flush=True)
-    if tally.cap_hits:
-        tally.notes.append(
-            f"{tally.cap_hits} answers stopped at the cap and their letters come "
-            "from truncated text")
+        _fresh_case(cfg, args, item, case_id, index, len(items), rows, tally)
+    _cap_note(tally)
     return tally, rows
 
 

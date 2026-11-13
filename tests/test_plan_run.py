@@ -28,13 +28,20 @@ from scripts.lib.plan_run import (  # noqa: E402
     KIND_DEPENDENCY,
     KIND_MEASUREMENT,
     Option,
+    SOURCE_UNKNOWN,
     THINKING_CHOICES,
+    _digit,
     _engine_version,
+    _number,
+    _pinned,
     budget_seconds,
     model_footprint,
+    plan_run,
     resolve_thinking,
+    unknown_footprint,
 )
 from scripts.lib.server_probe import ServerFacts  # noqa: E402
+from scripts.lib.variables import Variable  # noqa: E402
 from tests.fixtures import (  # noqa: E402
     BAREMETAL,
     BY_ID,
@@ -43,6 +50,8 @@ from tests.fixtures import (  # noqa: E402
     ENGINE,
     FITS,
     FREE,
+    JUDGE,
+    LEGS,
     PAIR,
     PILOT,
     RICH,
@@ -141,6 +150,50 @@ class VramCreditTest(unittest.TestCase):
         result = plan(FITS, host=self.HOST, shape=self.READ)
         self.assertEqual(result.fit.tier, "T2")
         self.assertFalse(any("credited" in warning for warning in result.warnings))
+
+
+class FootprintFallbackTest(unittest.TestCase):
+    """What a plan carries when nothing could read the model: no numbers, and it says so."""
+
+    def test_the_unknown_footprint_names_its_ignorance(self):
+        blind = unknown_footprint()
+        self.assertFalse(blind.known)
+        self.assertEqual(blind.missing, ("the shape was never read",))
+        self.assertEqual(blind.source, SOURCE_UNKNOWN)
+
+    def test_the_gate_leg_is_marked_and_the_others_are_not(self):
+        self.assertTrue(runnable(plan(SMALL, selected=("selftest", "math500")), "selftest")
+                        .is_gate)
+        self.assertFalse(runnable(plan(SMALL, selected=("math500",)), "math500").is_gate)
+
+
+class ConfigCoercionTest(unittest.TestCase):
+    """Config numbers arrive as whatever TOML and the operator's hands produced."""
+
+    def test_a_number_passes_through_and_junk_falls_back(self):
+        self.assertEqual(_number(8, 1.0), 8.0)
+        self.assertEqual(_number(2.5, 1.0), 2.5)
+        self.assertEqual(_number(True, 1.0), 1.0)
+        self.assertEqual(_number("8", 1.0), 1.0)
+        self.assertEqual(_number(None, 1.0), 1.0)
+
+    def test_a_digit_is_whole(self):
+        self.assertEqual(_digit("9", 3), 3)
+        self.assertEqual(_digit(2.9, 3), 2)
+
+
+class PinnedValueTest(unittest.TestCase):
+    """The standard's answer for a variable, read from the table the planner keeps."""
+
+    def test_a_variable_with_no_standard_path_takes_the_fallback(self):
+        self.assertEqual(_pinned(STANDARD, "judge_model"), "")
+        self.assertEqual(_pinned(STANDARD, "judge_model", "fallback"), "fallback")
+
+    def test_a_missing_standard_value_reads_not_applicable(self):
+        self.assertEqual(_pinned({}, "ctx", "131072"), "n/a")
+
+    def test_a_table_value_is_joined_into_one_row(self):
+        self.assertIn("math500 500", _pinned(STANDARD, "items"))
 
 
 class FitAndWindowTest(unittest.TestCase):
@@ -358,6 +411,16 @@ class ThinkingTest(unittest.TestCase):
             self.assertEqual(mode, "on")
             self.assertIn("ignores the thinking flag", note)
             self.assertIn("native-forced", note)
+
+    def test_a_leg_pinned_off_stays_off_and_says_why_when_on_was_asked(self):
+        pinned_off = replace(BY_ID["math500"], thinking="required_off")
+        self.assertEqual(resolve_thinking(pinned_off, "on", SERVER),
+                         ("off", "the harness needs the channel empty"))
+        self.assertEqual(resolve_thinking(pinned_off, "off", SERVER), ("off", ""))
+
+    def test_a_leg_that_does_not_reason_at_all_reads_na(self):
+        flat = replace(BY_ID["math500"], thinking="n/a")
+        self.assertEqual(resolve_thinking(flat, "off", DEAF), ("n/a", ""))
 
 
 class DecisionRowTest(unittest.TestCase):
@@ -585,6 +648,33 @@ class BudgetTest(unittest.TestCase):
     def test_measured_speed_stretches_the_budget_past_the_floor(self):
         result = plan(SMALL, pilot=PilotResult(1.0, 1.0, 10, 3, 0, False))
         self.assertGreater(runnable(result, "math500").budget_s, BY_ID["math500"].budget_floor)
+
+
+class PlanWarningTest(unittest.TestCase):
+    """The warnings block: every reason to stop before spending hours on this run."""
+
+    HOSTLESS = HostFacts(gpus=(Gpu(0, "RTX 3050", 8192, 0, 170.0),), ram_total_gb=8.0,
+                         ram_available_gb=6.0)
+
+    def test_a_model_that_cannot_run_here_is_warned_not_planned(self):
+        result = plan(FITS, host=self.HOSTLESS)
+        self.assertTrue(any("will not run here" in warning for warning in result.warnings))
+
+    def test_a_measurement_variable_no_row_answers_is_warned(self):
+        """A planned leg uses the knob, so scoring without a value would not be comparable."""
+        extra = Variable(id="extra_knob", variable_class="M", applies_to=("math500",),
+                         stamp_key="extra_knob", what_it_changes="how many items are sampled",
+                         effect="changes the score's noise", source="standard",
+                         decision_rule="keep the standard's value")
+        result = plan_run(STANDARD, LEGS, list(VARIABLES) + [extra], FITS, RICH, SERVER,
+                          PILOT, JUDGE, engine=ENGINE)
+        self.assertIn("measurement variable extra_knob has no value on this plan",
+                      result.warnings)
+
+    def test_an_invalid_thinking_request_falls_back_to_the_standard(self):
+        """A typo in the profile's thinking switch must not read as an off-standard request."""
+        result = plan({**FITS, "thinking": "banana"})
+        self.assertEqual(runnable(result, "math500").thinking, "on")
 
 
 class SelectionTest(unittest.TestCase):

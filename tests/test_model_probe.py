@@ -249,6 +249,21 @@ class HfConfigTests(ShapeCase):
         self.assertFalse(shape.known)
         self.assertTrue(any("not an object" in problem for problem in shape.problems))
 
+    def test_an_unreadable_config_file_is_reported_as_unreadable(self):
+        directory = self.tmp / "locked"
+        directory.mkdir()
+        (directory / "config.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+            shape = read_hf_config(directory)
+        self.assertFalse(shape.known)
+        self.assertTrue(any("unreadable" in problem for problem in shape.problems))
+
+    def test_a_config_without_layer_count_is_reported(self):
+        config = dict(QWEN_DIR_CONFIG)
+        config.pop("num_hidden_layers")
+        shape = read_hf_config(write_hf_model(self.tmp / "nolayers", config, 500, 1))
+        self.assertTrue(any("num_hidden_layers" in problem for problem in shape.problems))
+
     def test_fractional_head_dim_is_reported(self):
         config = dict(QWEN_DIR_CONFIG)
         config.pop("head_dim")
@@ -405,6 +420,16 @@ class ResolveModelShapeTests(ShapeCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             shape = resolve_model_shape(props={"model_path": 7})
         self.assertEqual(shape.source, SOURCE_UNKNOWN)
+
+
+class MetaLookupTests(unittest.TestCase):
+    """A metadata value is only findable under its model's own architecture prefix."""
+
+    def test_a_lookup_without_an_architecture_finds_nothing(self):
+        self.assertIsNone(model_probe._meta({"x.block_count": 3}, "", "block_count"))
+
+    def test_a_lookup_uses_the_architecture_prefix(self):
+        self.assertEqual(model_probe._meta({"x.block_count": 3}, "x", "block_count"), 3)
 
 
 class ShapeSerialisationTests(unittest.TestCase):

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.env_probe import HostFacts, ToolFact  # noqa: E402
-from scripts.lib.legs import legs_by_id, load_legs  # noqa: E402
+from scripts.lib.legs import Leg, legs_by_id, load_legs  # noqa: E402
 from scripts.lib.prereqs import (  # noqa: E402
     Judge,
     interpreter_dependency,
@@ -216,6 +216,49 @@ class LegPrereqTest(unittest.TestCase):
         judge = Judge(model="judge", endpoint="http://host/v1", under_test="model")
         dependencies = resolve_prereqs(LEGS["writing"], STANDARD, host_with(), judge)
         self.assertEqual(unavailable(dependencies), ())
+
+
+class InterpreterDependencyTest(unittest.TestCase):
+    """The interpreter check asks the borrowed python, one branch at a time."""
+
+    def borrower(self, **overrides) -> Leg:
+        fields = dict(
+            id="borrower", name="Borrower", measures="nothing", scoring="exit code",
+            harness="native", implementation="in_repo", entry="scripts/bench_borrowed.py",
+            cap_var="caps.default", ctx_need=8192, thinking="primary_on",
+            thinking_effect="none measured", prereqs=(), resume="done_marker",
+            comparability_keys=("cap",), known_failures=("it can go wrong",),
+        )
+        fields.update(overrides)
+        return Leg(**fields)  # type: ignore[arg-type]
+
+    def test_no_declared_imports_passes_without_a_probe(self):
+        leg = self.borrower(interpreter_env="BORROWED_PYTHON")
+        standard = {"interpreters": {"BORROWED_PYTHON": sys.executable}}
+        dependency = interpreter_dependency(leg, standard)
+        self.assertTrue(dependency.available)
+        self.assertIn(sys.executable, dependency.detail)
+
+    def test_a_missing_interpreter_cannot_import_anything(self):
+        leg = self.borrower(interpreter="/nonexistent/python", interpreter_imports=("json",))
+        dependency = interpreter_dependency(leg, {})
+        self.assertFalse(dependency.available)
+        self.assertIn("does not exist", dependency.detail)
+        self.assertIn("json", dependency.detail)
+
+    def test_an_interpreter_that_imports_the_packages_passes(self):
+        leg = self.borrower(interpreter=sys.executable, interpreter_imports=("json", "struct"))
+        dependency = interpreter_dependency(leg, {})
+        self.assertTrue(dependency.available)
+        self.assertIn("json", dependency.detail)
+
+    def test_a_broken_probe_is_reported_as_an_ask_failure(self):
+        leg = self.borrower(interpreter=sys.executable, interpreter_imports=("json",))
+        with mock.patch("scripts.lib.prereqs.subprocess.run",
+                        side_effect=OSError("cannot fork")):
+            dependency = interpreter_dependency(leg, {})
+        self.assertFalse(dependency.available)
+        self.assertIn("could not be asked", dependency.detail)
 
 
 class ThinkingAvailabilityTest(unittest.TestCase):

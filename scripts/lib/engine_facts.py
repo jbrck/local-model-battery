@@ -110,23 +110,40 @@ def _llama_props(raw: dict, errors: list[str]) -> EngineFacts:
     )
 
 
+def _num_ctx_from_parameters(parameters: object) -> tuple[bool, int | None]:
+    """(stated, window) from a parameters block: whether a num_ctx line was present.
+
+    A num_ctx that is not a number is stated but unreadable, which is not the same as
+    none stated: the first ends the search, the second falls through to model_info.
+    """
+    if not isinstance(parameters, str):
+        return False, None
+    for line in parameters.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "num_ctx":
+            try:
+                return True, int(fields[1])
+            except ValueError:
+                return True, None
+    return False, None
+
+
+def _ctx_from_model_info(info: object) -> int | None:
+    """The context length a model_info dict carries, or None when it carries none."""
+    if not isinstance(info, dict):
+        return None
+    for key, value in info.items():
+        if key.endswith(".context_length") and isinstance(value, int):
+            return value
+    return None
+
+
 def _ollama_ctx(show: dict) -> int | None:
     """The window from parameters.num_ctx, or the model_info context length."""
-    parameters = show.get("parameters")
-    if isinstance(parameters, str):
-        for line in parameters.splitlines():
-            fields = line.split()
-            if len(fields) >= 2 and fields[0] == "num_ctx":
-                try:
-                    return int(fields[1])
-                except ValueError:
-                    return None
-    info = show.get("model_info")
-    if isinstance(info, dict):
-        for key, value in info.items():
-            if key.endswith(".context_length") and isinstance(value, int):
-                return value
-    return None
+    stated, window = _num_ctx_from_parameters(show.get("parameters"))
+    if stated:
+        return window
+    return _ctx_from_model_info(show.get("model_info"))
 
 
 def _ollama(show: dict, errors: list[str]) -> EngineFacts:

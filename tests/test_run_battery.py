@@ -352,6 +352,27 @@ class MainTest(FakeRun):
         self.assertTrue((self.out / "MANIFEST.json").is_file())
 
 
+class StatusAndDetachTest(FakeRun):
+    """The read-only commands answer and leave the run directory to the run itself."""
+
+    def test_status_reads_the_run_directory_and_leaves_it_alone(self):
+        (self.out / "legs").mkdir(parents=True)
+        (self.out / "run-plan.json").write_text(
+            json.dumps({"legs": [{"id": "math500"}], "skips": []}))
+        code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                 "--status"])
+        self.assertEqual(code, 0)
+        self.assertFalse((self.out / "MANIFEST.json").exists())
+
+    def test_detach_starts_a_child_and_names_where_to_look(self):
+        child = [sys.executable, "scripts/run_battery.py", "--out", str(self.out)]
+        with mock.patch.object(run_battery.detach, "launch",
+                               return_value=(4242, self.out / "run.log", child)):
+            code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                     "--detach"])
+        self.assertEqual(code, 0)
+
+
 class LoadPlanTest(FakeRun):
     """Reusing a plan keeps its settings; the host is still probed for the manifest."""
 

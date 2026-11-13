@@ -7,7 +7,15 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.lib.engine_facts import base_url, probe_engine  # noqa: E402
+from scripts.lib.engine_facts import (  # noqa: E402
+    EngineFacts,
+    _ctx_from_model_info,
+    _num_ctx_from_parameters,
+    _ollama_ctx,
+    base_url,
+    display_name,
+    probe_engine,
+)
 from scripts.lib.model import ModelConfig  # noqa: E402
 from tests.stub_json import JsonStub  # noqa: E402
 
@@ -138,6 +146,89 @@ class BaseUrlTest(unittest.TestCase):
     def test_a_trailing_v1_is_stripped_like_props_url_strips_it(self):
         self.assertEqual(base_url(cfg("http://h:11434/v1/")), "http://h:11434")
         self.assertEqual(base_url(cfg("http://h:4000")), "http://h:4000")
+
+
+class DisplayNameTest(unittest.TestCase):
+    def test_styled_names_and_the_passthrough(self):
+        self.assertEqual(display_name("vllm"), "vLLM")
+        self.assertEqual(display_name("sglang"), "SGLang")
+        self.assertEqual(display_name("mlx"), "MLX")
+        self.assertEqual(display_name("llama.cpp"), "llama.cpp")
+        self.assertEqual(display_name("unknown"), "unknown")
+
+
+class OllamaCtxTest(unittest.TestCase):
+    def test_the_first_num_ctx_line_wins(self):
+        show = {"parameters": "num_keep_alive 24\nnum_ctx 4096\nnum_ctx 999"}
+        self.assertEqual(_ollama_ctx(show), 4096)
+
+    def test_a_parameters_block_that_is_not_text_falls_through(self):
+        self.assertIsNone(_ollama_ctx({"parameters": 12, "model_info": {}}))
+        self.assertIsNone(_ollama_ctx({}))
+
+    def test_model_info_that_is_not_a_dict_states_nothing(self):
+        self.assertIsNone(_ollama_ctx({"model_info": "n/a"}))
+
+    def test_non_integer_context_lengths_are_ignored(self):
+        show = {"model_info": {"m.context_length": "big", "other": 5}}
+        self.assertIsNone(_ollama_ctx(show))
+
+    def test_a_stated_but_unreadable_num_ctx_does_not_fall_through(self):
+        stated, window = _num_ctx_from_parameters("num_ctx bananas")
+        self.assertTrue(stated)
+        self.assertIsNone(window)
+        self.assertEqual(_ollama_ctx({"parameters": "num_ctx bananas",
+                                      "model_info": {"a.context_length": 99}}), None)
+
+    def test_no_num_ctx_line_is_reported_as_not_stated(self):
+        stated, window = _num_ctx_from_parameters("stop <|eot|>")
+        self.assertFalse(stated)
+        self.assertIsNone(window)
+        self.assertEqual(_num_ctx_from_parameters(None), (False, None))
+
+    def test_a_context_length_under_any_architecture_prefix_is_read(self):
+        self.assertEqual(_ctx_from_model_info({"qwen3.context_length": 4096}), 4096)
+        self.assertIsNone(_ctx_from_model_info({"context_length": 4096}))
+        self.assertIsNone(_ctx_from_model_info({"m.context_length": "big"}))
+
+
+class SerialisationTest(unittest.TestCase):
+    def test_to_dict_carries_every_field_and_lists_the_errors(self):
+        facts = EngineFacts(engine="llama.cpp", version="b1", window=8192, slots=1,
+                            kv_type="q8_0", flash_attn=True, model_path="m.gguf",
+                            model_dir="/models", supports_kv_flags=True, drafter="mtp",
+                            source="props", errors=("get_model_info: HTTP 404",))
+        payload = facts.to_dict()
+        self.assertEqual(payload["engine"], "llama.cpp")
+        self.assertEqual(payload["version"], "b1")
+        self.assertEqual(payload["window"], 8192)
+        self.assertEqual(payload["slots"], 1)
+        self.assertEqual(payload["kv_type"], "q8_0")
+        self.assertTrue(payload["flash_attn"])
+        self.assertEqual(payload["model_path"], "m.gguf")
+        self.assertEqual(payload["model_dir"], "/models")
+        self.assertTrue(payload["supports_kv_flags"])
+        self.assertEqual(payload["drafter"], "mtp")
+        self.assertEqual(payload["source"], "props")
+        self.assertEqual(payload["errors"], ["get_model_info: HTTP 404"])
+
+    def test_the_default_facts_serialise_with_their_nones(self):
+        payload = EngineFacts(errors=("props: refused",)).to_dict()
+        self.assertEqual(payload["engine"], "unknown")
+        self.assertIsNone(payload["window"])
+        self.assertIsNone(payload["slots"])
+        self.assertIsNone(payload["kv_type"])
+        self.assertIsNone(payload["flash_attn"])
+        self.assertIsNone(payload["model_path"])
+        self.assertIsNone(payload["model_dir"])
+        self.assertFalse(payload["supports_kv_flags"])
+        self.assertIsNone(payload["drafter"])
+        self.assertEqual(payload["source"], "")
+        self.assertEqual(payload["errors"], ["props: refused"])
+
+    def test_an_engine_that_answered_something_is_known(self):
+        self.assertTrue(EngineFacts(engine="openai-compatible").known)
+        self.assertFalse(EngineFacts().known)
 
 
 if __name__ == "__main__":

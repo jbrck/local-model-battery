@@ -182,6 +182,51 @@ def _flags(raw: object) -> list[bool]:
     return [bool(flag) for flag in raw]
 
 
+def _attention_from_per_layer_heads(metadata: dict, arch: str, notes: list[str]) -> int | None:
+    """Attention layers counted from a per-layer KV head array, or None when absent.
+
+    A layer with zero KV heads holds no cache, so a mixed array says exactly which layers
+    attend. A uniform array says nothing and is left to the readers below.
+    """
+    per_layer_heads = _meta(metadata, arch, "attention.head_count_kv")
+    if not isinstance(per_layer_heads, list) or not per_layer_heads:
+        return None
+    active = sum(1 for head in per_layer_heads if _as_int(head) > 0)
+    if not 0 < active < len(per_layer_heads):
+        return None
+    notes.append(f"{active} of {len(per_layer_heads)} layers carry a KV cache "
+                 f"(per-layer head counts); the rest have none")
+    return active
+
+
+def _attention_from_recurrent_layers(metadata: dict, arch: str, notes: list[str]) -> int | None:
+    """Attention layers counted from a per-layer recurrent flag list, or None when absent."""
+    recurrent = _flags(_meta(metadata, arch, "attention.recurrent_layers"))
+    if not recurrent or all(recurrent):
+        return None
+    active = sum(1 for flag in recurrent if not flag)
+    notes.append(f"{active} of {len(recurrent)} layers are attention layers; "
+                 f"the rest are recurrent and hold no growing cache")
+    return active
+
+
+def _attention_from_interval(metadata: dict, arch: str, block_count: int,
+                             notes: list[str]) -> int | None:
+    """Attention layers counted from the full-attention interval, or None when absent.
+
+    One full-attention layer every `interval` blocks. Verified against the three qwen35
+    files on this box, which report 17, 16 and 17 attention layers for block counts 65, 64
+    and 65 at interval 4.
+    """
+    interval = _as_int(_meta(metadata, arch, "full_attention_interval"))
+    if interval <= 1 or block_count <= 0:
+        return None
+    active = (block_count + interval - 1) // interval
+    notes.append(f"one full-attention layer every {interval} blocks gives {active} of "
+                 f"{block_count} layers; the rest are recurrent and hold no growing cache")
+    return active
+
+
 def _attention_layer_count(metadata: dict, arch: str, block_count: int) -> tuple[int, list[str]]:
     """How many layers hold a growing, full-context KV cache.
 
@@ -191,30 +236,12 @@ def _attention_layer_count(metadata: dict, arch: str, block_count: int) -> tuple
     reference collection declare this three different ways, so all three are read.
     """
     notes: list[str] = []
-    per_layer_heads = _meta(metadata, arch, "attention.head_count_kv")
-    if isinstance(per_layer_heads, list) and per_layer_heads:
-        active = sum(1 for head in per_layer_heads if _as_int(head) > 0)
-        if 0 < active < len(per_layer_heads):
-            notes.append(f"{active} of {len(per_layer_heads)} layers carry a KV cache "
-                         f"(per-layer head counts); the rest have none")
-            return active, notes
-    recurrent = _flags(_meta(metadata, arch, "attention.recurrent_layers"))
-    if recurrent and not all(recurrent):
-        active = sum(1 for flag in recurrent if not flag)
-        if active > 0:
-            notes.append(f"{active} of {len(recurrent)} layers are attention layers; "
-                         f"the rest are recurrent and hold no growing cache")
-            return active, notes
-    interval = _as_int(_meta(metadata, arch, "full_attention_interval"))
-    if interval > 1 and block_count > 0:
-        # One full-attention layer every `interval` blocks. Verified against the three
-        # qwen35 files on this box, which report 17, 16 and 17 attention layers for block
-        # counts 65, 64 and 65 at interval 4.
-        active = (block_count + interval - 1) // interval
-        notes.append(f"one full-attention layer every {interval} blocks gives {active} of "
-                     f"{block_count} layers; the rest are recurrent and hold no growing cache")
-        return active, notes
-    return block_count, notes
+    active = _attention_from_per_layer_heads(metadata, arch, notes)
+    if active is None:
+        active = _attention_from_recurrent_layers(metadata, arch, notes)
+    if active is None:
+        active = _attention_from_interval(metadata, arch, block_count, notes)
+    return (block_count if active is None else active), notes
 
 
 def _kv_heads(metadata: dict, arch: str) -> int:
@@ -332,14 +359,16 @@ def read_gguf_shape(path: str | Path) -> ModelShape:
         source=SOURCE_GGUF, path=str(target), notes=tuple(notes), problems=tuple(problems))
 
 
-def _hf_layers_and_windows(config: dict, total: int) -> tuple[int, int, list[str]]:
-    """(attention layers, windowed layers, notes) from the config's per-layer type list."""
+def _hf_layer_kinds(config: dict) -> list[str] | None:
+    """The config's per-layer type names, lowercased, or None when it declares none."""
     layer_types = config.get("layer_types")
     if not isinstance(layer_types, list) or not layer_types:
-        return total, 0, []
-    kinds = [str(kind).lower() for kind in layer_types]
-    linear = sum(1 for kind in kinds if "linear" in kind)
-    sliding = sum(1 for kind in kinds if "sliding" in kind)
+        return None
+    return [str(kind).lower() for kind in layer_types]
+
+
+def _hf_layer_notes(kinds: list[str], linear: int, sliding: int) -> list[str]:
+    """Notes for the layer kinds that cost less than a full-context attention layer."""
     notes: list[str] = []
     if 0 < linear < len(kinds):
         notes.append(f"{len(kinds) - linear} of {len(kinds)} layers are attention layers; "
@@ -347,7 +376,17 @@ def _hf_layers_and_windows(config: dict, total: int) -> tuple[int, int, list[str
     if sliding:
         notes.append(f"{sliding} of {len(kinds)} layers are sliding-window and hold a "
                      f"bounded cache")
-    return len(kinds) - linear, sliding, notes
+    return notes
+
+
+def _hf_layers_and_windows(config: dict, total: int) -> tuple[int, int, list[str]]:
+    """(attention layers, windowed layers, notes) from the config's per-layer type list."""
+    kinds = _hf_layer_kinds(config)
+    if kinds is None:
+        return total, 0, []
+    linear = sum(1 for kind in kinds if "linear" in kind)
+    sliding = sum(1 for kind in kinds if "sliding" in kind)
+    return len(kinds) - linear, sliding, _hf_layer_notes(kinds, linear, sliding)
 
 
 def _safetensors_bytes(model_dir: Path) -> tuple[int, list[str]]:
@@ -358,6 +397,44 @@ def _safetensors_bytes(model_dir: Path) -> tuple[int, list[str]]:
     return sum(shard.stat().st_size for shard in shards), []
 
 
+def _load_hf_config(directory: Path) -> tuple[dict, ModelShape | None]:
+    """The parsed config.json, or an empty dict with the failure shape that stands in for it."""
+    config_path = directory / HF_CONFIG_NAME
+    if not config_path.is_file():
+        return {}, ModelShape(source=SOURCE_HF, path=str(directory),
+                              problems=(f"not a model directory: {config_path} missing",))
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return {}, ModelShape(source=SOURCE_HF, path=str(directory),
+                              problems=(f"unreadable {HF_CONFIG_NAME}: {error}",))
+    if not isinstance(config, dict):
+        return {}, ModelShape(source=SOURCE_HF, path=str(directory),
+                              problems=(f"{HF_CONFIG_NAME} is not an object",))
+    return config, None
+
+
+def _hf_head_dim(config: dict, heads: int, hidden: int) -> int:
+    """The declared head width, or the derived one, or zero when neither works."""
+    head_dim = _as_int(config.get("head_dim"))
+    if head_dim > 0:
+        return head_dim
+    if heads > 0 and hidden % heads == 0:
+        return hidden // heads
+    return 0
+
+
+def _hf_field_problems(head_dim: int, total: int, hidden: int, heads: int) -> list[str]:
+    """The config fields the fit math cannot run without, when they are missing."""
+    problems: list[str] = []
+    if head_dim <= 0:
+        problems.append("head_dim is not declared and hidden_size does not divide by "
+                        f"num_attention_heads ({hidden}/{heads})")
+    if total <= 0:
+        problems.append("num_hidden_layers not found in the config")
+    return problems
+
+
 def read_hf_config(model_dir: str | Path) -> ModelShape:
     """Describe a model served from HF weights, which is how vLLM and EXL3 serve.
 
@@ -365,18 +442,9 @@ def read_hf_config(model_dir: str | Path) -> ModelShape:
     reference collection is exactly that case.
     """
     directory = Path(model_dir)
-    config_path = directory / HF_CONFIG_NAME
-    if not config_path.is_file():
-        return ModelShape(source=SOURCE_HF, path=str(directory),
-                          problems=(f"not a model directory: {config_path} missing",))
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        return ModelShape(source=SOURCE_HF, path=str(directory),
-                          problems=(f"unreadable {HF_CONFIG_NAME}: {error}",))
-    if not isinstance(config, dict):
-        return ModelShape(source=SOURCE_HF, path=str(directory),
-                          problems=(f"{HF_CONFIG_NAME} is not an object",))
+    config, problem = _load_hf_config(directory)
+    if problem is not None:
+        return problem
 
     problems: list[str] = []
     total = _as_int(config.get("num_hidden_layers"))
@@ -384,16 +452,10 @@ def read_hf_config(model_dir: str | Path) -> ModelShape:
     heads = _as_int(config.get("num_attention_heads"))
     kv_heads = _as_int(config.get("num_key_value_heads")) or heads
     hidden = _as_int(config.get("hidden_size"))
-    head_dim = _as_int(config.get("head_dim"))
-    if head_dim <= 0 and heads > 0 and hidden % heads == 0:
-        head_dim = hidden // heads
+    head_dim = _hf_head_dim(config, heads, hidden)
     weights_bytes, weight_problems = _safetensors_bytes(directory)
     problems.extend(weight_problems)
-    if head_dim <= 0:
-        problems.append("head_dim is not declared and hidden_size does not divide by "
-                        f"num_attention_heads ({hidden}/{heads})")
-    if total <= 0:
-        problems.append("num_hidden_layers not found in the config")
+    problems.extend(_hf_field_problems(head_dim, total, hidden, heads))
 
     cost = _hf_kv_cost(config, n_layers, windowed, kv_heads, head_dim)
     return ModelShape(
@@ -479,6 +541,22 @@ def _candidate(path: str, problems: list[str]) -> ModelShape | None:
     return None
 
 
+def _candidate_paths(model_file: str, model_dir: str, props: dict | None) -> list[str]:
+    """The paths to try, in priority order: explicit arguments, then what the server reports."""
+    override = os.environ.get(ENV_MODEL_FILE, "")
+    paths = [model_file, model_dir] if (model_file or model_dir) else [override]
+    paths.append(_served_path(props))
+    return paths
+
+
+def _fallback_shape(profile: dict | None) -> ModelShape:
+    """The profile's numbers, or an unknown shape when there is no profile either."""
+    if profile:
+        return shape_from_profile(profile)
+    return ModelShape(source=SOURCE_UNKNOWN,
+                      problems=("no model file and no profile, so the shape is unknown",))
+
+
 def resolve_model_shape(model_file: str = "", model_dir: str = "", props: dict | None = None,
                         profile: dict | None = None) -> ModelShape:
     """The best shape available, in priority order, with the source it came from.
@@ -488,9 +566,7 @@ def resolve_model_shape(model_file: str = "", model_dir: str = "", props: dict |
     a lower-priority answer.
     """
     problems: list[str] = []
-    override = os.environ.get(ENV_MODEL_FILE, "")
-    paths = [model_file, model_dir] if (model_file or model_dir) else [override]
-    paths.append(_served_path(props))
+    paths = _candidate_paths(model_file, model_dir, props)
     seen: set[str] = set()
     for path in paths:
         if not path or path in seen:
@@ -502,7 +578,4 @@ def resolve_model_shape(model_file: str = "", model_dir: str = "", props: dict |
     if not any(paths):
         problems.append(f"no model file given, {ENV_MODEL_FILE} unset, and the server "
                         f"reported no model path")
-    fallback = shape_from_profile(profile) if profile else ModelShape(
-        source=SOURCE_UNKNOWN,
-        problems=("no model file and no profile, so the shape is unknown",))
-    return _merge(fallback, problems)
+    return _merge(_fallback_shape(profile), problems)

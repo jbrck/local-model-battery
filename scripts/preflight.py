@@ -111,29 +111,49 @@ def check_endpoint(plan: RunPlan, server: ServerFacts) -> list[Check]:
             + _slots_check(plan, server))
 
 
+def _ram_check(plan: RunPlan, host: HostFacts) -> Check | None:
+    """A T2 tier spills weights into RAM, and that spill needs headroom to stay spare."""
+    if plan.fit.tier != "T2":
+        return None
+    spill = max(0.0, plan.fit.weights_gb - plan.fit.vram_free_gb)
+    available = host.ram_available_gb or 0.0
+    return Check("host:ram", available >= spill + RAM_HEADROOM_GB,
+                 f"{spill:.1f} GB of weights land in RAM and {available:.1f} GB is "
+                 f"free; {RAM_HEADROOM_GB:.0f} GB has to stay spare")
+
+
+def _idle_check(host: HostFacts) -> Check | None:
+    """Other compute processes shrink the VRAM this run can use, which only warns."""
+    if not host.compute_apps:
+        return None
+    return Check("host:idle", True,
+                 f"{len(host.compute_apps)} compute process(es) hold VRAM on this "
+                 f"host; whatever this run does not own is counted against it",
+                 hard=False)
+
+
+def _credit_check(plan: RunPlan) -> Check | None:
+    """The operator should see when the tier rests on VRAM credited to this run."""
+    credited = [warning for warning in plan.warnings if "credited to this run" in warning]
+    if not credited:
+        return None
+    return Check("host:credit", True, credited[0], hard=False)
+
+
+def _swap_check(host: HostFacts) -> Check | None:
+    """Swap use means the host is under memory pressure and timing will be noisy."""
+    if not (host.swap_used_gb and host.swap_used_gb > SWAP_TOLERANCE_GB):
+        return None
+    return Check("host:swap", True,
+                 f"{host.swap_used_gb:.1f} GB in swap: this host is under memory "
+                 f"pressure and timing will be noisy", hard=False)
+
+
 def check_host(plan: RunPlan, host: HostFacts) -> list[Check]:
     """VRAM, RAM and anything else already using them."""
-    fit = plan.fit
-    checks = [Check("host:fits", fit.fits, fit.reason)]
-    if fit.tier == "T2":
-        spill = max(0.0, fit.weights_gb - fit.vram_free_gb)
-        available = host.ram_available_gb or 0.0
-        checks.append(Check("host:ram", available >= spill + RAM_HEADROOM_GB,
-                            f"{spill:.1f} GB of weights land in RAM and {available:.1f} GB is "
-                            f"free; {RAM_HEADROOM_GB:.0f} GB has to stay spare"))
-    if host.compute_apps:
-        checks.append(Check("host:idle", True,
-                            f"{len(host.compute_apps)} compute process(es) hold VRAM on this "
-                            f"host; whatever this run does not own is counted against it",
-                            hard=False))
-    credited = [warning for warning in plan.warnings if "credited to this run" in warning]
-    if credited:
-        checks.append(Check("host:credit", True, credited[0], hard=False))
-    if host.swap_used_gb and host.swap_used_gb > SWAP_TOLERANCE_GB:
-        checks.append(Check("host:swap", True,
-                            f"{host.swap_used_gb:.1f} GB in swap: this host is under memory "
-                            f"pressure and timing will be noisy", hard=False))
-    return checks
+    extras = [check for check in (_ram_check(plan, host), _idle_check(host),
+                                  _credit_check(plan), _swap_check(host)) if check]
+    return [Check("host:fits", plan.fit.fits, plan.fit.reason)] + extras
 
 
 def check_pilot(pilot: PilotResult) -> list[Check]:
@@ -215,32 +235,51 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _profile_for(args) -> dict:
+    """The profile the arguments name, with the model id filled from what was given."""
+    profile = load_toml(args.profile) if args.profile else {}
+    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
+    profile.setdefault("id", fallback)
+    return profile
+
+
+def _model_config(args, profile: dict) -> ModelConfig:
+    """The client the probes and the pilot run against."""
+    return ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
+                       api_key=args.api_key)
+
+
+def _judge_for(args, cfg: ModelConfig) -> Judge:
+    """The judge the standard pins, unless the arguments named one."""
+    return Judge(model=args.judge_model or None, endpoint=args.judge_endpoint or None,
+                 under_test=cfg.name)
+
+
+def _selected_legs(args) -> tuple[str, ...]:
+    """The leg ids the arguments asked for, or an empty tuple for the whole catalog."""
+    return tuple(item.strip() for item in args.legs.split(",") if item.strip())
+
+
 def _plan_from_args(args, standard: dict, legs):
     """Probe the machine and the endpoint, then plan the run the arguments describe.
 
     The model's shape is read from the model itself, so a profile is only needed for a model
     that neither the GGUF header nor the HF config can describe.
     """
-    profile = load_toml(args.profile) if args.profile else {}
-    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
-    profile.setdefault("id", fallback)
+    profile = _profile_for(args)
     host = probe_host()
-    cfg = ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
-                      api_key=args.api_key)
+    cfg = _model_config(args, profile)
     server = probe_server(cfg)
     pilot = run_pilot(cfg)
-    judge = Judge(model=args.judge_model or None, endpoint=args.judge_endpoint or None,
-                  under_test=cfg.name)
+    judge = _judge_for(args, cfg)
     shape = resolve_model_shape(model_file=args.model_file, model_dir=args.model_dir,
                                 props=getattr(server, "props", None), profile=profile)
-    selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
-    pid = serving_pid_for(args.endpoint)
     # The engine is named by its probes, once, here: the preflight plan stamps the same
     # engine the orchestrator's plan will.
     engine = probe_engine(cfg)
     plan = plan_run(standard, legs, load_variables(), profile, host, server, pilot, judge,
-                    selected, STANDARD_FILE, args.profile, model_shape=shape, serving_pid=pid,
-                    engine=engine)
+                    _selected_legs(args), STANDARD_FILE, args.profile, model_shape=shape,
+                    serving_pid=serving_pid_for(args.endpoint), engine=engine)
     return plan, host, server, pilot
 
 
