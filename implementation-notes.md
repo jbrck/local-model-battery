@@ -280,10 +280,13 @@ Four requirements, and where each stands:
 2. **Guide the operator through the variables that would change the score.** Done. The decision
    rows carry chosen against alternative, the consequence and the source of each number, and
    `variables.toml` records what each variable measured.
-3. **Run detached and save results along the way.** Neither exists. Plan tasks 11 and 12.
-4. **Output the report.** Missing, and the absence is self-inflicted: `3ffe4ce` deleted the v1
-   reporting toolchain (`report_scores.py`, `build_scoring_corpus.py`) and put nothing in its place.
-   Plan task 13.
+3. **Run detached and save results along the way.** Done. `--detach` re-executes the run in its own
+   session, appends stdout and stderr to `results/<run>/run.log`, writes `run.pid` and exits without
+   polling; `--status` reads the run directory and cross-checks the pid. Every benchmark writes each
+   case to `legs/cases/` as it scores it, so an interrupted leg resumes instead of restarting.
+4. **Output the report.** Done, rebuilt after `3ffe4ce` deleted the v1 toolchain
+   (`report_scores.py`, `build_scoring_corpus.py`) and put nothing in its place: `scripts/report.py
+   <run>` writes `report.md` and `report.json` from the run's own files.
 
 ### Deviations
 
@@ -315,4 +318,36 @@ Implemented: the pid file records the pid and the run directory together, and a 
 alive but is not this run is called out as such.
 Reason: a bare pid file cannot tell a running battery from a recycled pid, and the second one reads
 as a hang. Liveness is checked with `os.kill(pid, 0)` and nothing is ever signalled.
+
+### Defects found after 11-13 landed
+
+**[Task 13 — 2026-11-12]**
+Found by: a test asserting that a harness version matching the plan produces no finding.
+The report called a leg "not comparable" that had never run. `_comparability` skipped rows whose
+status was `NO_RESULT_STATUS` -- `"no result"`, which means no result file at all -- so a leg whose
+block said `status: "not run"` fell through and was compared against the plan anyway. A leg that
+never ran records no `thinking` value, so the report printed:
+
+    not comparable: lcb ran at thinking ; the plan set on
+
+The LCB leg did not run. Nothing recorded is not the same claim as nothing comparable; both statuses
+are now skipped.
+
+**[Task 13 — 2026-11-12]**
+`COMPARABLE_KEYS` and `FAILED_STATUSES` were both dead in `report.py`. `COMPARABLE_KEYS` is now the
+tuple `_leg_findings` iterates rather than a second copy of it, and `FAILED_STATUSES` was deleted --
+`run_battery.py` holds the one that is used.
+
+### The quality gate was measuring the wrong file
+
+`quality-gauntlet`'s coverage matcher keyed files by basename. `scripts/report.py` and
+`scripts/lib/report.py` share one, so every function in the library was scored against the CLI's
+coverage: 22 of 26 methods read another file's data, `_comparability` reported 0% when it was
+covered at 87%, and the CRAP gate went quiet because it skips methods whose coverage it cannot
+place. The fix is in the skill (`_suffix_match` prefers the longest shared tail, `_basename_match`
+refuses an ambiguous basename instead of picking a file).
+
+With real numbers the gate failed five functions on CRAP and four on coverage. CRAP cannot go below
+its function's complexity, so passing it at a threshold of 8 means CC <= 7: `report.py` was split
+until nothing exceeds it. A coverage matcher that guesses silently stops being a gate at all.
 
