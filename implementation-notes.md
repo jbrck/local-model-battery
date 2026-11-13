@@ -429,4 +429,44 @@ until the user names them.
 - Regex trap worth remembering: `iq?\d` requires a literal leading "i" (`?` binds to `q`). The
   quant-tag pattern must be `i?q\d(?:_[a-z0-9]+)*` to match both `Q4_K_M` and `IQ3_XXS`.
 
+## The judge's reasoning switch is the endpoint's call, not the battery's
+
+Task 16 assumed `reasoning_effort: "none"` is accepted wherever a judge runs. Live against the
+pinned default (`nous-glm-5-3-flash` behind the local gateway): six calls out of six refused with a
+400 saying reasoning is mandatory and cannot be disabled, while the identical call carrying no
+`reasoning_effort` returned 200 three times out of three. Every judgement in a writing run would
+have been an error. The calibration is what caught it, and only because it scores answers whose
+quality is known by construction: a judge that scored none of them cannot come out `discriminates`.
+
+`_ask_judge` now sends the switch and, on exactly that refusal (a non-ok response whose error text
+names reasoning), asks once more without it. Any other failure is a real failure and is not retried.
+Which way it ran comes back with the score as `judge_path` (`reasoning_off`, `reasoning_on`,
+`no_call`), because a judge that reasoned and a judge that did not are not the same instrument and a
+run has to be able to say which one scored it. The reasoning channel is read only on the
+`reasoning_on` path: a suppressed call that returns empty spent its budget, and that is an error
+rather than a judgement found by reading a monologue.
+
+Re-run against the same endpoint, the calibration returned spread 7.0 and `discriminates`: good 8.0,
+bad 2.0, truncated 5.0, empty 1.0 (the floor, taken without a call). All three calls were stamped
+`reasoning_on`, so the fallback is the path every judgement in a writing run now takes.
+
+## Two corrections the live runs forced on the brief
+
+- **A reachable engine that is not llama.cpp printed four 404s.** `openai-compatible` identified
+  itself off `/v1/models` at the local gateway and then listed the props, version, health and show
+  probes as errors. None of those is an error: they are endpoints this engine does not serve, and
+  the engine was identified without them. Once the engine is known the brief says how many probes
+  went unanswered and stops there. While it is still unknown every error is printed, because then
+  they are the reason rather than noise.
+- **`openai-compatible` had no row to read.** It is a real outcome (an OpenAI-shaped `/v1/models`
+  answered and nothing identified the software behind it) and the brief said so, but it had no
+  effect or comparability text to print. `engines.toml` now carries that row: unknown window,
+  unknown cache behaviour, a cap and a window the run could not verify, comparable to itself on that
+  endpoint and to nothing else. `proxy` keeps its old meaning: a router with a real engine behind
+  it.
+
+Both corrections came from running the thing rather than from reading it, which is the argument for
+the brief being printed on a live endpoint before it is called finished: every defect above was
+invisible against a stub.
+
 

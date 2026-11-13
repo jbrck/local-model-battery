@@ -26,11 +26,11 @@
 | Task | State | Where |
 |---|---|---|
 | 1-4 model_probe | **done** | `53af9ca` |
-| 5-6 engine_facts | not started | |
+| 5-6 engine_facts | **done** | per `2026-11-12-consult-and-engine-facts.md`, commit `cd4334f` |
 | 7 plan from the probed shape | **done** | `dbf3152` |
-| 8 engine-shaped decisions | not started | |
+| 8 engine-shaped decisions | **done** | per `2026-11-12-consult-and-engine-facts.md`, commit `cd4334f` |
 | 9 interpreter | **done** | `f95a842` |
-| 10 docs, skill, gate | not started | |
+| 10 docs, skill, gate | **in progress** | last; see `2026-11-12-consult-and-engine-facts.md` |
 | 11 detached run | **done** | `dde87ab` |
 | 12 save along the way | **done** | `dde87ab` |
 | 13 the report | **done** | `dde87ab` |

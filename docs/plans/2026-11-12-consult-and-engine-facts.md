@@ -21,13 +21,17 @@
 | 9 interpreter | done `f95a842` |
 | 11-13 detach, checkpoints, report | done `dde87ab` |
 | knowledge tables | done `6fdf97d` |
-| 5 engine_facts | this document |
-| 6 engine on every run | this document |
-| 8 engine-shaped decisions | this document |
-| 14 the consult brief | this document |
-| 15 the brief before the engine is up | this document |
-| 16 the judge is the user's choice | this document |
-| 10 docs, skill, gate | last |
+| 5 engine_facts | done `cd4334f` |
+| 6 engine on every run | done `cd4334f` |
+| 8 engine-shaped decisions | done `cd4334f` |
+| 14 the consult brief | done `383db83` |
+| 15 the brief before the engine is up | done `383db83` |
+| 16 the judge is the user's choice | done `383db83` |
+| 10 docs, skill, gate | in progress |
+
+Follow-ups landed outside the numbered tasks: the judge's retry without the
+reasoning switch in `98b22f7`, and the `openai-compatible` row in `engines.toml`
+in `ee9cded`.
 
 ---
 

@@ -1,22 +1,27 @@
 # Model profiles
 
-One file per model. The plan reads it to work out what will fit on this box, how much window
-the model can be served with, and where the KV cache goes. Nothing here is a benchmark
-setting: caps, thinking and seeds all come from `standard.toml`.
-
-Copy `example.toml` and fill it in. Every number is something you can read off the box
-rather than remember.
+One file per model. A profile is an override for a model that neither reader can
+describe: not the GGUF header, and not a HuggingFace model directory. Even then
+it only supplies the numbers those readers could not. The normal path is no
+profile at all: point `scripts/plan_run.py` at the model with `--model-file` or
+`--model-dir`, or let it read from a live endpoint, and the shape comes off the
+model itself. Nothing here is a benchmark setting: caps, thinking and seeds all
+come from `standard.toml`.
 
 ## Fields
+
+Copy `example.toml` only when you actually need the override. Every number is
+one you read off a source that knows the model, never one you derive from
+another number.
 
 | Field | What it is | Where it comes from |
 |---|---|---|
 | `id` | the name this run uses, defaults to the file stem | you |
-| `weights_gb` | size of the GGUF on disk | `ls -l` the model file, divide bytes by 1073741824 |
+| `weights_gb` | size of the weights on disk | `ls -l` the model file, divide bytes by 1073741824 |
 | `quant` | the quant label, for the record | the filename, e.g. `Q4_K_M` |
-| `[model].n_layers` | transformer block count | `llama.cpp` `/props` → `n_layers`, or GGUF metadata |
-| `[model].n_kv_heads` | KV heads (GQA) | `/props` → `n_kv_heads` (equal to `n_head` when there is no GQA) |
-| `[model].head_dim` | `n_embd / n_head` | `/props` → `n_embd`, `n_head` |
+| `[model].n_layers` | transformer block count | the model's own published metadata |
+| `[model].n_kv_heads` | KV heads (GQA) | the model's own published metadata; equal to `n_head` only when there is no GQA |
+| `[model].head_dim` | attention head dimension | the model's own published metadata. Some architectures have a `head_dim` that differs from `n_embd / n_head`, so never derive it |
 | `[model].kv_type` | KV cache type actually served | the serve command, `--cache-type-k`; defaults to `standard.toml`'s `serve.kv_k` |
 
 `weights_gb` and the three shape numbers are required for a real fit answer. Leave them out

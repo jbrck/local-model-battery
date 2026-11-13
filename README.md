@@ -31,26 +31,63 @@ bash setup.sh
 
 Creates `.venv`, installs `requirements.txt`, and verifies the data files.
 
+Then run the consult brief:
+
+```bash
+python3 scripts/consult.py --endpoint http://localhost:11434/v1
+```
+
+It reads the host and the model, probes the endpoint, and prints a brief: what
+it measured and where each fact came from, the call and fit verdict, the use
+cases and the variables you can still set, judge candidates, the smoke check,
+and the exact `run_battery.py` command with the `--detach` and `--status`
+lines. It decides nothing. The legs and the judge stay as placeholders in the
+printed lineup until you name them.
+
+With no endpoint running, name the engine you intend to serve with instead:
+
+```bash
+python3 scripts/consult.py --engine llama.cpp
+```
+
+The brief prints that engine's serve and smoke instructions rather than
+measured facts. The path is the same for every engine, so `--engine mlx` on a
+Mac reads the same way. The OS is never consulted.
+
+The brief's source of truth is the knowledge tables in the repo root
+(`engines.toml`, `model-types.toml`, `use-cases.toml`, `variables.toml`). It
+reads them by id, so correcting a row corrects the brief with no code change.
+A missing table or row exits 2 naming the ids that exist. No section renders
+silently empty.
+
 ## Quick start
+
+The steps in order: the consult brief, your answers to it, the decision sheet
+from `plan_run.py`, the run detached, `--status` to check on it, and the report
+when it is done.
 
 ```bash
 source .venv/bin/activate
 
-# Smoke test: 10 problems per mechanical benchmark (~5 min)
-python scripts/run_battery.py --model MyModel \
-  --endpoint http://localhost:11434/v1 --smoke-only
+# The brief: what the host and the model are, and what to decide
+python scripts/consult.py --endpoint http://localhost:11434/v1
 
-# Full mechanical battery (2-6 hours, model speed dependent)
-python scripts/run_battery.py --model MyModel \
-  --endpoint http://localhost:11434/v1
+# The decision sheet: reads the model's shape from the model itself
+python scripts/plan_run.py --model MyModel --endpoint http://localhost:11434/v1
 
-# Full battery plus writing generation
+# Start the run and walk away
 python scripts/run_battery.py --model MyModel \
-  --endpoint http://localhost:11434/v1 --writing
+  --endpoint http://localhost:11434/v1 --detach
+
+# Check on it
+python scripts/run_battery.py --status
+
+# The report, when the run is done
+python scripts/report.py results/<run>
 ```
 
-`--model` is the alias the endpoint expects, not a display name. `--skip math500`
-(repeatable) drops a benchmark.
+`--model` is the alias the endpoint expects, not a display name. `--legs` takes
+a comma-separated subset of leg ids.
 
 ## Writing suite
 
@@ -84,6 +121,14 @@ With no judge the leg still generates everything, reports itself as not scored
 and names what is missing. `WRITING_JUDGE_MODEL` and `WRITING_JUDGE_ENDPOINT` do
 the same job when `run_battery.py` drives the run, and the judge model lands in
 the manifest as a comparability key.
+
+Which judge is your call. `scripts/consult.py` lists the endpoint's models,
+excludes every model under test, and names the pinned default out loud even
+when the endpoint does not serve it. Before a run, prove the one you picked can
+score: `scripts/calibrate_judge.py` sends four answers of known quality (good,
+bad, truncated, empty) through the real judge path, serially, and prints the
+per-answer scores, the spread, and a verdict of `discriminates` or
+`does not discriminate`.
 
 Re-scoring stored answers is cheap, so changing the judge never means repeating
 generation.
@@ -143,9 +188,12 @@ Check the upstream terms before redistributing a dataset in another product.
 
 ## AI-assisted setup
 
-`skill/SKILL.md` is a portable procedure for an AI assistant: setup, smoke test,
-full run, and how to read the results. Point your assistant at that file, or paste
-it in as instructions. It assumes nothing about which agent or runtime you use.
+`scripts/consult.py` prints the setup brief an assistant works from: what it
+read on the host and the model, what it measured on the engine, the decisions
+to put to you, and the exact run command. `skill/SKILL.md` is a portable
+procedure for an AI assistant that walks through it: setup, smoke test, full
+run, and how to read the results. Point your assistant at those files, or paste
+them in as instructions. It assumes nothing about which agent or runtime you use.
 
 ## Contributing
 
