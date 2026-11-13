@@ -351,3 +351,45 @@ With real numbers the gate failed five functions on CRAP and four on coverage. C
 its function's complexity, so passing it at a threshold of 8 means CC <= 7: `report.py` was split
 until nothing exceeds it. A coverage matcher that guesses silently stops being a gate at all.
 
+### One request at a time, always
+
+**[Design — 2026-11-12]** JB's rule: the tests are daisy-chained, never parallel. A local box serves
+one model, so two legs or two requests in flight fight for the same GPU and the tokens-per-second
+figure stops meaning anything -- the number that a run's rankings partly rest on.
+
+Held by construction, not by a lock. There are no threads, no asyncio and no multiprocessing
+anywhere under `scripts/`; `run_all` is a `for` loop over the planned legs, `harness.ask` is one
+blocking POST, and the LCB generation phase is a `for` loop of single requests. Nothing needs to
+enforce the rule because there is no pool to schedule into. A future contributor adding
+`concurrent.futures` to any of it, for speed, would break every tps number the battery has
+produced.
+
+`limits.lcb_workers` is the one setting that reads like parallelism and is not: it is passed to
+`num_process_evaluate`, lcb_runner's sandboxed code execution, which runs generated code against
+the test cases and never touches the model. `serve.slots` is capacity, not concurrency -- with
+unified KV, one request at a time still sees the whole window.
+
+### The gate was checking nothing at all
+
+**[Design — 2026-11-12]** Two faults in `quality-gauntlet` made every `--changed` run of this repo
+partly vacuous, and both are fixed in the skill:
+
+- `get_changed_files` ran `git diff --name-only HEAD` with `cwd=scripts`. Git answers that from the
+  repository root, so each path was prefixed a second time (`scripts/scripts/lib/report.py`),
+  resolved to nothing, and `radon_for_files` swallowed radon's error into `{}`. The gate reported
+  `{"passed": true, "summary": {"total_methods": 0}}`: a pass having analyzed zero files. Only
+  untracked files survived, because `git ls-files` does answer from the current directory. The diff
+  calls now pass `--relative`, deleted paths are dropped, and a run with no files to check says so
+  on stderr instead of reporting a clean pass.
+- The gate runs pytest with `sys.executable`. Run it with the tool venv and every test module that
+  imports a repo dependency skips at collection: `tests/test_bench_math500.py` needs sympy, so it
+  skipped, and all six of math500's functions scored 0% coverage and reported as failures. The repo
+  now declares its gate tooling in `requirements-dev.txt` (`radon`, `pytest`, `pytest-cov`), so its
+  own venv can run both halves of the gate, sympy included.
+
+With the gate reading the right files through the right interpreter the repo stands at 24 failures
+out of 577 methods: 15 CRAP and 9 coverage, concentrated in `plan_run.py` (10) and `model_probe.py`
+(5), with `preflight.py`, `legs.py`, `prereqs.py`, `run_battery.py`, `bench_gpqa_diamond.py` and
+`bench_humaneval_plus.py` carrying one or two each. None were introduced by tasks 11-13; they were
+hidden, not absent. Complexity passes outright.
+

@@ -23,7 +23,8 @@ prompt_headroom = 16384
 
 [serve]
 ctx = 131072          # the largest leg cap sets this floor
-slots = 4             # -np 4, matches lcb_workers
+slots = 4             # -np 4: capacity, not parallelism. The battery asks one request at a time,
+                      # and unified KV means that one request still sees the whole window.
 kv_unified = true     # explicit -np without unified KV gives each slot ctx/slots
 flash_attn = true
 kv_k = "q8_0"
@@ -54,7 +55,7 @@ toolbench = 69
 mmlu = 500
 mmlu_even_per_subject = false
 lcb = 100
-lcb_workers = 4
+lcb_workers = 4       # LCB's sandboxed code evaluation. It never touches the model.
 hermesagent20 = 20
 writing = 138
 

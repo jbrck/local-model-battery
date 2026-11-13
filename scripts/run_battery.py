@@ -15,9 +15,12 @@ One command, one run directory. The directory ends up holding:
     python3 scripts/run_battery.py --model arete-27b \
         --profile profiles/arete-27b.toml --out runs/arete-27b
 
-Legs run one at a time: the box serves one model, so overlapping legs would just fight
-for the same GPU and make tps meaningless. Each leg gets the cap, window, thinking setting
-and case timeout the plan decided, and a wall-clock limit off the pilot's measured speed.
+Legs run one at a time, and one request is in flight at a time inside a leg. The box serves one
+model, so anything overlapping fights for the same GPU and the tokens-per-second figure stops
+meaning anything. That is a rule, not an implementation detail: no leg fan-out, no threads, no
+asyncio. It is held by construction -- there is no pool to schedule into. Each leg gets the cap,
+window, thinking setting and case timeout the plan decided, and a wall-clock limit off the
+pilot's measured speed.
 """
 from __future__ import annotations
 
