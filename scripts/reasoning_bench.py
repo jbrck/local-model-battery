@@ -2,11 +2,14 @@
 """Reasoning bench: whether the model emits a trace, and how long it is."""
 from __future__ import annotations
 
+import os
 import sys
 
-from scripts.lib.harness import (LegArgs, Tally, ask, finish, leg_config, load_items,
-                                 parse_leg_args)
-from scripts.lib.model import ChatResponse
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.lib.harness import (  # noqa: E402
+    LegArgs, Tally, ask, finish, leg_config, load_items, parse_leg_args)
+from scripts.lib.model import ChatResponse  # noqa: E402
 
 LEG_ID = "reasoning"
 DEFAULT_DATA = "data/reasoning_tasks.json"

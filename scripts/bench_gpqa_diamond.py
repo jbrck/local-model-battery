@@ -2,13 +2,17 @@
 """GPQA-Diamond: graduate-level science questions, graded by answer letter."""
 from __future__ import annotations
 
+import os
 import re
 import sys
 
-from scripts.lib.harness import (LegArgs, Tally, ask, case_record, finish, is_cap_hit,
-                                 leg_config, load_case, load_items, parse_leg_args,
-                                 replay_response, write_case)
-from scripts.lib.model import ChatResponse
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.lib.harness import (  # noqa: E402
+    LegArgs, Tally, ask, case_record, finish, is_cap_hit,
+    leg_config, load_case, load_items, parse_leg_args,
+    replay_response, write_case)
+from scripts.lib.model import ChatResponse  # noqa: E402
 
 LEG_ID = "gpqa_diamond"
 DEFAULT_DATA = "data/gpqa_diamond.json"

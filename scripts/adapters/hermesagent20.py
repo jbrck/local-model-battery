@@ -7,8 +7,10 @@ import os
 import subprocess
 import sys
 
-from scripts.lib.harness import (LegArgs, Tally, add_leg_args, finish,
-                                 parse_leg_args)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+from scripts.lib.harness import (  # noqa: E402
+    LegArgs, Tally, add_leg_args, finish, parse_leg_args)
 
 LEG_ID = "hermesagent20"
 PACK_ID = "hermesagent-20"
