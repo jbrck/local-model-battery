@@ -17,9 +17,11 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from scripts.lib.env_probe import Gpu, HostFacts  # noqa: E402
+from scripts.lib.engine_facts import EngineFacts  # noqa: E402
 from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
+from scripts.manifest import build_manifest  # noqa: E402
 from scripts.lib.plan_run import (  # noqa: E402
     Decision,
     KIND_CAPACITY,
@@ -27,8 +29,10 @@ from scripts.lib.plan_run import (  # noqa: E402
     KIND_MEASUREMENT,
     Option,
     THINKING_CHOICES,
+    _engine_version,
     budget_seconds,
     model_footprint,
+    resolve_thinking,
 )
 from scripts.lib.server_probe import ServerFacts  # noqa: E402
 from tests.fixtures import (  # noqa: E402
@@ -36,6 +40,7 @@ from tests.fixtures import (  # noqa: E402
     BY_ID,
     DEAD_PILOT,
     DEAF,
+    ENGINE,
     FITS,
     FREE,
     PAIR,
@@ -46,6 +51,8 @@ from tests.fixtures import (  # noqa: E402
     STANDARD,
     TOOLS,
     VARIABLES,
+    VLLM,
+    SERVER,
     decision,
     plan,
     runnable,
@@ -344,6 +351,14 @@ class ThinkingTest(unittest.TestCase):
         result = plan({**FITS, "thinking": "off"}, server=unknown)
         self.assertEqual(runnable(result, "math500").thinking, "off")
 
+    def test_an_engine_that_always_reasons_stays_on_whatever_was_asked(self):
+        """Pinned regression: a deaf endpoint cannot turn reasoning off, in either column."""
+        for requested in ("on", "off"):
+            mode, note = resolve_thinking(BY_ID["reasoning"], requested, DEAF)
+            self.assertEqual(mode, "on")
+            self.assertIn("ignores the thinking flag", note)
+            self.assertIn("native-forced", note)
+
 
 class DecisionRowTest(unittest.TestCase):
     """The row type the sheet is built from: when it reads as a deviation, and how it serialises."""
@@ -403,7 +418,7 @@ class DecisionTest(unittest.TestCase):
         self.assertIn("24 GB", result.stamp["host_vram"])
 
     def test_the_engine_version_comes_from_the_endpoint(self):
-        self.assertEqual(decision(plan(SMALL), "engine_version").chosen, "b4567-abc")
+        self.assertEqual(decision(plan(SMALL), "engine_version").chosen, "llama.cpp b4567-abc")
 
     def test_a_case_timeout_is_derived_from_the_measured_speed(self):
         slow = PilotResult(tps=12.0, latency_s=4.0, generated_tokens=400, requests=3, failed=0,
@@ -438,6 +453,121 @@ class DecisionTest(unittest.TestCase):
         result = plan(FITS, judge=None)
         self.assertEqual(decision(result, "judge_model").chosen, "none configured")
         self.assertTrue(decision(result, "prereq:writing").needs_operator)
+
+
+class EngineStampTest(unittest.TestCase):
+    """Every run names its engine, whatever engine it is, and records its window apart."""
+
+    def test_the_props_fallback_names_the_engine_with_the_props_build(self):
+        self.assertEqual(_engine_version(ENGINE, SERVER), "llama.cpp b4567-abc")
+
+    def test_an_engine_that_reports_its_own_build_uses_that_build(self):
+        self.assertEqual(_engine_version(VLLM, SERVER), "vllm 0.6.6")
+
+    def test_nothing_reporting_build_is_said_plainly(self):
+        gone = ServerFacts(reachable=False)
+        self.assertEqual(_engine_version(VLLM, gone), "vllm 0.6.6")
+        bare = EngineFacts(engine="llama.cpp", supports_kv_flags=True)
+        self.assertEqual(_engine_version(bare, gone), "llama.cpp (build not reported)")
+
+    def test_the_plan_stamps_the_engine_it_probed(self):
+        result = plan(SMALL)
+        self.assertEqual(result.engine, "llama.cpp")
+        self.assertEqual(result.engine_version, "llama.cpp b4567-abc")
+        self.assertEqual(result.engine_window, 131072)
+        self.assertTrue(result.supports_kv_flags)
+        self.assertIsNone(result.drafter)
+
+    def test_a_vllm_plan_stamps_vllm_and_no_kv_flags(self):
+        result = plan(SMALL, engine=VLLM)
+        self.assertEqual(result.engine, "vllm")
+        self.assertEqual(result.engine_version, "vllm 0.6.6")
+        self.assertFalse(result.supports_kv_flags)
+
+    def test_the_engine_window_is_recorded_apart_from_the_planned_ctx(self):
+        """A 16 GB model caps the window below what the engine actually serves."""
+        result = plan(FITS)
+        self.assertEqual(result.engine_window, 131072)
+        self.assertIsNotNone(result.engine_window)
+        self.assertLess(runnable(result, "math500").ctx, result.engine_window)
+
+    def test_the_sheet_names_the_engine(self):
+        self.assertIn("engine   llama.cpp b4567-abc", plan(SMALL).render())
+
+    def test_the_engine_fields_survive_the_run_plan_round_trip(self):
+        result = plan(SMALL)
+        restored = plan_from_dict(json.loads(json.dumps(result.to_dict())))
+        self.assertEqual(restored.engine, "llama.cpp")
+        self.assertEqual(restored.engine_version, "llama.cpp b4567-abc")
+        self.assertEqual(restored.engine_window, 131072)
+        self.assertTrue(restored.supports_kv_flags)
+        self.assertEqual(restored.render(), result.render())
+
+    def test_a_legacy_plan_without_engine_fields_reads_back_as_unknown(self):
+        payload = plan(SMALL).to_dict()
+        for key in ("engine", "engine_version", "engine_window", "supports_kv_flags",
+                    "drafter"):
+            payload.pop(key)
+        restored = plan_from_dict(json.loads(json.dumps(payload)))
+        self.assertEqual(restored.engine, "unknown")
+        self.assertFalse(restored.supports_kv_flags)
+        self.assertIsNone(restored.engine_window)
+
+    def test_a_manifest_lists_what_the_engine_said(self):
+        manifest = build_manifest(plan(SMALL), RICH, SERVER)
+        engine = manifest["engine"]
+        self.assertEqual(engine["engine"], "llama.cpp")
+        self.assertEqual(engine["engine_version"], "llama.cpp b4567-abc")
+        self.assertEqual(engine["engine_window"], 131072)
+        self.assertTrue(engine["supports_kv_flags"])
+        self.assertIsNone(engine["drafter"])
+
+
+class EngineKnobTest(unittest.TestCase):
+    """A knob the engine does not have is emitted with n/a and a reason, never dropped."""
+
+    def test_the_kv_row_reads_not_applicable_on_vllm(self):
+        row = decision(plan(SMALL, engine=VLLM), "kv_type")
+        self.assertEqual(row.chosen, "n/a")
+        self.assertEqual(row.consequence,
+                         "vLLM manages the KV cache itself (paged attention), so this knob "
+                         "does not exist here")
+        self.assertTrue(row.is_deviation)
+
+    def test_the_kv_row_keeps_the_standard_on_llama_cpp(self):
+        self.assertEqual(decision(plan(SMALL), "kv_type").chosen, "q8_0")
+
+    def test_the_flash_attn_row_reads_not_applicable_on_vllm(self):
+        row = decision(plan(SMALL, engine=VLLM), "flash_attn")
+        self.assertEqual(row.chosen, "n/a")
+        self.assertIn("vLLM", row.consequence)
+        self.assertIn("flash-attention", row.consequence)
+        self.assertTrue(row.is_deviation)
+
+    def test_the_flash_attn_row_keeps_the_standard_on_llama_cpp(self):
+        self.assertEqual(decision(plan(SMALL), "flash_attn").chosen, "True")
+
+    def test_a_slots_row_above_one_on_a_batching_engine_names_the_difference(self):
+        row = decision(plan(SMALL, engine=VLLM), "slots")
+        self.assertEqual(row.chosen, "4")
+        self.assertIn("vLLM also batches concurrent requests", row.consequence)
+        self.assertIn("slots and batching are different things that both split one KV budget",
+                      row.consequence)
+
+    def test_the_slots_row_stays_plain_on_llama_cpp(self):
+        row = decision(plan(SMALL), "slots")
+        self.assertEqual(row.chosen, "4")
+        self.assertIn("more slots means a smaller window", row.consequence)
+
+    def test_an_unknown_engine_reports_na_instead_of_assuming(self):
+        row = decision(plan(SMALL, engine=None), "kv_type")
+        self.assertEqual(row.chosen, "n/a")
+        self.assertIn("no engine answered the probes", row.consequence)
+
+    def test_the_stamp_says_na_where_the_knob_does_not_exist(self):
+        result = plan(SMALL, engine=VLLM)
+        self.assertEqual(result.stamp["kv_type"], "n/a")
+        self.assertEqual(result.stamp["flash_attn"], "n/a")
 
 
 class BudgetTest(unittest.TestCase):

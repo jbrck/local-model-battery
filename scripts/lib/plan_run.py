@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from scripts.lib.config import get_dotted, resolve_md5
+from scripts.lib.engine_facts import EngineFacts, display_name
 from scripts.lib.env_probe import HostFacts, vram_held_gb
 from scripts.lib.fit import (
     BYTES_PER_GB,
@@ -77,6 +78,17 @@ STANDARD_PATHS = {
 
 THINKING_STANDARD = "on"
 THINKING_CHOICES = ("on", "off", "native")
+
+# Engines that batch concurrent requests by design (engines.toml's effect rows for vllm and
+# sglang): their served rate is throughput, not single-stream speed. A slots row above one
+# has to say so, because slots and batching are different things that both split one KV budget.
+BATCHING_ENGINES = ("vllm", "sglang")
+
+# Why a knob row reads n/a: the sentences that name the engine, completed by _knob_absent.
+KV_KNOB_ABSENT = ("manages the KV cache itself (paged attention), so this knob does not "
+                  "exist here")
+FLASH_KNOB_ABSENT = ("manages its own attention kernels, so the flash-attention launch flag "
+                     "does not exist here")
 
 
 @dataclass(frozen=True)
@@ -219,6 +231,11 @@ class RunPlan:
     profile_path: str = ""
     profile_md5: str = ""
     footprint: Footprint = field(default_factory=unknown_footprint)
+    engine: str = "unknown"
+    engine_version: str = ""
+    engine_window: int | None = None
+    supports_kv_flags: bool = False
+    drafter: str | None = None
 
     @property
     def needs_operator(self) -> tuple[Decision, ...]:
@@ -266,6 +283,11 @@ class RunPlan:
             "stamp_line": self.stamp_line,
             "total_budget_s": self.total_budget_s,
             "stamp": self.stamp,
+            "engine": self.engine,
+            "engine_version": self.engine_version,
+            "engine_window": self.engine_window,
+            "supports_kv_flags": self.supports_kv_flags,
+            "drafter": self.drafter,
         }
 
     def render(self) -> str:
@@ -274,6 +296,8 @@ class RunPlan:
             f"Battery {self.standard_version} plan -- {self.model}",
             "=" * 60,
             f"fit      {self.fit.tier} {self.fit.verdict}: {self.fit.reason}",
+            f"engine   {self.engine_version or 'not identified'}"
+            + (f", window {self.engine_window}" if self.engine_window else ""),
         ]
         shape_line = _shape_line(self.footprint)
         if shape_line:
@@ -629,18 +653,22 @@ class _PlanInputs:
     judge: Judge | None
     fit: Fit
     footprint: Footprint
+    engine: EngineFacts
     ctx: int
     ctx_asked: bool
     caps: dict[str, int]
     planned: tuple[PlannedLeg, ...]
 
 
-def _engine_version(server: ServerFacts) -> str:
+def _engine_version(engine: EngineFacts, server: ServerFacts) -> str:
+    """The engine build, named on every engine rather than only llama.cpp."""
+    if engine.version:
+        return f"{engine.engine} {engine.version}"
     props = server.props if isinstance(server.props, dict) else {}
-    for key in ("build_info", "version", "model_path"):
+    for key in ("build_info", "version"):
         if props.get(key):
-            return str(props[key])
-    return "not reported"
+            return f"{engine.engine} {props[key]}"
+    return f"{engine.engine} (build not reported)"
 
 
 def _placement(fit: Fit) -> str:
@@ -664,7 +692,7 @@ def capacity_decisions(inputs: _PlanInputs) -> list[Decision]:
         ("power_limit", f"{min(limits):g} W" if limits else "not reported",
          "the lowest card limit caps throughput for the whole run", HOST),
         ("offload_placement", _placement(fit), f"tier {fit.tier}: {fit.verdict}", HOST),
-        ("engine_version", _engine_version(inputs.server),
+        ("engine_version", _engine_version(inputs.engine, inputs.server),
          f"as reported by {inputs.server.served_model or 'the endpoint'}", ENGINE),
         ("weight_quant", str(inputs.profile.get("weight_quant") or "unknown"),
          "from the profile; two quants of one model are not the same entry", PROFILE),
@@ -731,13 +759,9 @@ def measurement_decisions(inputs: _PlanInputs) -> list[Decision]:
                  _items_summary(standard),
                  "the same items for every model on every host; each leg stamps their hash",
                  STANDARD),
-        Decision("flash_attn", KIND_MEASUREMENT, _pinned(standard, "flash_attn"),
-                 _pinned(standard, "flash_attn"),
-                 "buys throughput and some window; a kernel change can move numerics",
-                 STANDARD),
+        _flash_attn_decision(inputs),
         Decision("slots", KIND_MEASUREMENT, _pinned(standard, "slots"), _pinned(standard, "slots"),
-                 f"{_pinned(standard, 'slots')} concurrent slots split the same KV budget, so "
-                 f"more slots means a smaller window or a smaller cache", STANDARD),
+                 _slots_consequence(inputs), STANDARD),
         _case_timeout_decision(inputs),
         _harness_limit_decision("context_limit", inputs, "the harness stops the case when the "
                                 "context fills instead of truncating silently"),
@@ -745,6 +769,44 @@ def measurement_decisions(inputs: _PlanInputs) -> list[Decision]:
         _judge_decision(inputs),
     ]
     return [row for row in decisions if row is not None]
+
+
+def _knob_absent(engine: EngineFacts, why: str) -> str:
+    """Why a knob row reads n/a, naming the engine or the missing identification."""
+    if not engine.known:
+        return ("no engine answered the probes, so whether this knob exists here is unknown; "
+                "the row is recorded as not applicable rather than assumed")
+    return f"{display_name(engine.engine)} {why}"
+
+
+def _flash_attn_decision(inputs: _PlanInputs) -> Decision:
+    """The flash-attention launch flag, which only some engines expose.
+
+    llama.cpp is the only engine here that surfaces its cache and attention kernels as
+    launch flags, so the same fact gates this row and the KV row.
+    """
+    pinned = _pinned(inputs.standard, "flash_attn")
+    if not inputs.engine.supports_kv_flags:
+        return Decision("flash_attn", KIND_MEASUREMENT, "n/a", pinned,
+                        _knob_absent(inputs.engine, FLASH_KNOB_ABSENT), ENGINE)
+    return Decision("flash_attn", KIND_MEASUREMENT, pinned, pinned,
+                    "buys throughput and some window; a kernel change can move numerics",
+                    STANDARD)
+
+
+def _slots_consequence(inputs: _PlanInputs) -> str:
+    """What the slot count does, which a batching engine doubles up on."""
+    pinned = _pinned(inputs.standard, "slots")
+    base = (f"{pinned} concurrent slots split the same KV budget, so "
+            "more slots means a smaller window or a smaller cache")
+    if pinned in ("", "n/a") or _pinned_int(inputs.standard, "slots") <= 1:
+        return base
+    if inputs.engine.engine in BATCHING_ENGINES:
+        return (f"{pinned} concurrent slots split the same KV budget, and "
+                f"{display_name(inputs.engine.engine)} also batches concurrent requests: "
+                "slots and batching are different things that both split one KV budget, "
+                "so the served rate is throughput, not single-stream speed")
+    return base
 
 
 def _effect(inputs: _PlanInputs, variable_id: str) -> str:
@@ -783,6 +845,10 @@ def _pinned_int(standard: dict, name: str) -> int:
 
 
 def _kv_decision(inputs: _PlanInputs, pinned: str) -> Decision:
+    """The KV cache type, which is a launch flag only where the engine exposes one."""
+    if not inputs.engine.supports_kv_flags:
+        return Decision("kv_type", KIND_MEASUREMENT, "n/a", pinned,
+                        _knob_absent(inputs.engine, KV_KNOB_ABSENT), ENGINE)
     chosen = inputs.footprint.kv_type or pinned
     options: tuple[Option, ...] = ()
     if chosen != pinned:
@@ -945,7 +1011,8 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
              standard_path: str = "standard.toml",
              profile_path: str = "",
              model_shape: ModelShape | None = None,
-             serving_pid: int | None = None) -> RunPlan:
+             serving_pid: int | None = None,
+             engine: EngineFacts | None = None) -> RunPlan:
     """Build the plan: fit, window, per-leg caps, decisions, warnings and the stamp."""
     chosen = [leg for leg in legs if not selected or leg.id in selected]
     fit, footprint = compute_plan_fit(profile, standard, host, model_shape, serving_pid)
@@ -956,9 +1023,11 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
         request = THINKING_STANDARD
     planned, skips, leg_decisions = plan_legs(chosen, standard, ctx, request, server, host,
                                               judge, pilot)
+    engine_facts = engine if engine is not None else EngineFacts()
     inputs = _PlanInputs(standard=standard, variables=variables, profile=profile, host=host,
                          server=server, pilot=pilot, judge=judge, fit=fit,
-                         footprint=footprint, ctx=ctx, ctx_asked=ctx_decision is not None,
+                         footprint=footprint, engine=engine_facts,
+                         ctx=ctx, ctx_asked=ctx_decision is not None,
                          caps={item.id: item.cap for item in planned},
                          planned=tuple(planned))
     decisions = ([ctx_decision] if ctx_decision else []) + leg_decisions
@@ -976,4 +1045,9 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
         profile_path=profile_path,
         profile_md5=resolve_md5(profile_path),
         footprint=footprint,
+        engine=engine_facts.engine,
+        engine_version=_engine_version(engine_facts, server),
+        engine_window=engine_facts.window,
+        supports_kv_flags=engine_facts.supports_kv_flags,
+        drafter=engine_facts.drafter,
     )

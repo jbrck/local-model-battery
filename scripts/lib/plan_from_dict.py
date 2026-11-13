@@ -83,4 +83,9 @@ def plan_from_dict(payload: dict, legs: list[Leg] | None = None) -> RunPlan:
         profile_path=profile.get("path", ""),
         profile_md5=profile.get("md5", ""),
         footprint=_footprint(payload.get("footprint")),
+        engine=payload.get("engine", "unknown"),
+        engine_version=payload.get("engine_version", ""),
+        engine_window=payload.get("engine_window"),
+        supports_kv_flags=bool(payload.get("supports_kv_flags", False)),
+        drafter=payload.get("drafter"),
     )

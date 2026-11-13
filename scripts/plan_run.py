@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
+from scripts.lib.engine_facts import probe_engine  # noqa: E402
 from scripts.lib.env_probe import probe_host, serving_pid_for  # noqa: E402
 from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
@@ -100,8 +101,10 @@ def probe_from_args(args: argparse.Namespace):
     # The process answering the endpoint is holding the model under test. Naming it lets the
     # fit credit those weights to this run instead of counting them as someone else's.
     pid = None if args.no_probe else serving_pid_for(args.endpoint)
+    # The engine is named by its probes, once, here: every stamp below reads from this plan.
+    engine = None if args.no_probe else probe_engine(cfg)
     plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected,
-                    model_shape=shape, serving_pid=pid)
+                    model_shape=shape, serving_pid=pid, engine=engine)
     return plan, host, server, pilot
 
 

@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.lib.config import load_toml  # noqa: E402
+from scripts.lib.engine_facts import EngineFacts  # noqa: E402
 from scripts.lib.env_probe import Gpu, HostFacts, ToolFact  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.model_probe import ModelShape  # noqa: E402
@@ -41,6 +42,11 @@ SERVER = ServerFacts(reachable=True, served_model="arete-27b", ctx=131072, slots
                      reasoning_channel=True, thinking_on_tokens=1400, thinking_off_tokens=90,
                      tools_with_json_schema_ok=True, props={"build_info": "b4567-abc",
                                                             "model_path": "arete-27b.gguf"})
+# The engine behind SERVER, as its props probe would identify it.
+ENGINE = EngineFacts(engine="llama.cpp", version="b4567-abc", window=131072, slots=4,
+                     model_path="arete-27b.gguf", supports_kv_flags=True, source="props")
+# The same endpoint served by vllm: version and max_model_len, no cache or attention flags.
+VLLM = EngineFacts(engine="vllm", version="0.6.6", window=131072, source="version + models")
 DEAF = ServerFacts(reachable=True, served_model="arete-27b", ctx=131072, slots=1,
                    chat_template_mentions_thinking=False, thinking_switch=False,
                    reasoning_channel=False, thinking_on_tokens=300, thinking_off_tokens=300,
@@ -65,9 +71,10 @@ FREE = ("math500", "mmlu")
 def plan(profile: dict = FITS, standard: dict | None = None, host: HostFacts = RICH,
          server: ServerFacts = SERVER, pilot: PilotResult = PILOT,
          judge: Judge | None = JUDGE, selected: tuple[str, ...] = (),
-         shape: ModelShape | None = None, serving_pid: int | None = None) -> RunPlan:
+         shape: ModelShape | None = None, serving_pid: int | None = None,
+         engine: EngineFacts | None = ENGINE) -> RunPlan:
     return plan_run(standard or STANDARD, LEGS, VARIABLES, profile, host, server, pilot,
-                    judge, selected, model_shape=shape, serving_pid=serving_pid)
+                    judge, selected, model_shape=shape, serving_pid=serving_pid, engine=engine)
 
 
 def runnable(result: RunPlan, leg_id: str):

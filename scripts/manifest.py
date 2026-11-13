@@ -123,6 +123,13 @@ def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts | None) -
         "stamp_line": plan.stamp_line,
         "stamp": plan.stamp,
         "fit": plan.fit.to_dict(),
+        "engine": {
+            "engine": plan.engine,
+            "engine_version": plan.engine_version,
+            "engine_window": plan.engine_window,
+            "supports_kv_flags": plan.supports_kv_flags,
+            "drafter": plan.drafter,
+        },
     }
 
 

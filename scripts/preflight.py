@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
+from scripts.lib.engine_facts import probe_engine  # noqa: E402
 from scripts.lib.env_probe import HostFacts, probe_host, serving_pid_for  # noqa: E402
 from scripts.lib.fit import RAM_HEADROOM_GB  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
@@ -234,8 +235,12 @@ def _plan_from_args(args, standard: dict, legs):
                                 props=getattr(server, "props", None), profile=profile)
     selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
     pid = serving_pid_for(args.endpoint)
+    # The engine is named by its probes, once, here: the preflight plan stamps the same
+    # engine the orchestrator's plan will.
+    engine = probe_engine(cfg)
     plan = plan_run(standard, legs, load_variables(), profile, host, server, pilot, judge,
-                    selected, STANDARD_FILE, args.profile, model_shape=shape, serving_pid=pid)
+                    selected, STANDARD_FILE, args.profile, model_shape=shape, serving_pid=pid,
+                    engine=engine)
     return plan, host, server, pilot
 
 
