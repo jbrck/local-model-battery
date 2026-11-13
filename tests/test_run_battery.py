@@ -20,6 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from scripts import bench_writing_generate  # noqa: E402
 from scripts import run_battery  # noqa: E402
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.plan_run import PlannedLeg, Skip  # noqa: E402
@@ -63,6 +64,14 @@ class FakeRun(unittest.TestCase):
                              case_timeout_s=900)
         return replace(planned, **changes)
 
+    def writing(self) -> PlannedLeg:
+        """The writing leg as the standard plans it: no thinking switch, a 16384 cap."""
+        leg = replace(fixtures.BY_ID["writing"], implementation="in_repo",
+                      entry="scripts/bench_writing_generate.py",
+                      data="data/writing_suite_v1.json")
+        return PlannedLeg(leg=leg, cap=16384, ctx=131072, thinking="n/a", budget_s=0,
+                          case_timeout_s=900)
+
     def args(self, **changes) -> argparse.Namespace:
         base = dict(model="arete-27b", profile="profiles/example.toml",
                     model_file="", model_dir="",
@@ -74,13 +83,6 @@ class FakeRun(unittest.TestCase):
 
 class JudgeWiringTest(FakeRun):
     """The judge reaches the writing leg's command line, and no other leg's."""
-
-    def writing(self) -> PlannedLeg:
-        leg = replace(fixtures.BY_ID["writing"], implementation="in_repo",
-                      entry="scripts/bench_writing_generate.py",
-                      data="data/writing_suite_v1.json")
-        return PlannedLeg(leg=leg, cap=16384, ctx=131072, thinking="n/a", budget_s=0,
-                          case_timeout_s=900)
 
     def test_the_writing_leg_gets_the_judge_flags(self):
         args = self.args(judge_model="nous-glm-5-3-flash",
@@ -157,6 +159,25 @@ class LegCommandTest(FakeRun):
         planned = replace(planned, leg=replace(planned.leg, data=""))
         command = run_battery.leg_command(planned, self.args(), self.out, str(self.root), "m")
         self.assertNotIn("--data", command)
+
+    def test_a_leg_with_no_thinking_switch_is_not_handed_one(self):
+        command = run_battery.leg_command(self.planned(thinking="n/a"), self.args(),
+                                          self.out, str(self.root), "m")
+        self.assertNotIn("--thinking", command)
+
+    def test_a_leg_that_switches_thinking_off_is_still_told(self):
+        command = run_battery.leg_command(self.planned(thinking="off"), self.args(),
+                                          self.out, str(self.root), "m")
+        self.assertEqual(command[command.index("--thinking") + 1], "off")
+
+    def test_the_writing_leg_gets_a_command_line_its_own_parser_accepts(self):
+        command = run_battery.leg_command(self.writing(), self.args(judge_model="my-judge",
+                                                                   judge_endpoint="http://j/v1"),
+                                          self.out, str(self.root), "arete-27b")
+        options = bench_writing_generate.parse_args(command[2:])
+        self.assertEqual(options.args.model, "arete-27b")
+        self.assertEqual(options.args.cap, 16384)
+        self.assertEqual(options.judge_model, "my-judge")
 
 
 class ReadBlockTest(FakeRun):

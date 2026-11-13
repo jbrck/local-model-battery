@@ -69,6 +69,12 @@ def elapsed(start: float) -> str:
 
 FAILED_STATUSES = ("fail", "timeout")
 
+# The values a leg's --thinking flag accepts. The standard also records n/a, for a leg
+# whose generation takes no thinking switch at all (the writing leg), so that value must
+# never reach a command line: argparse in those legs would reject the whole invocation and
+# the leg would be recorded as missing rather than run.
+THINKING_SWITCHES = ("on", "off")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
@@ -161,8 +167,9 @@ def leg_command(planned, args: argparse.Namespace, out_dir: Path, root: str,
                "--endpoint", args.endpoint, "--api-key", args.api_key,
                "--output-dir", str(out_dir / LEGS_DIR),
                "--cap", str(planned.cap), "--ctx", str(planned.ctx),
-               "--thinking", planned.thinking,
                "--timeout", str(planned.case_timeout_s)]
+    if planned.thinking in THINKING_SWITCHES:
+        command += ["--thinking", planned.thinking]
     if planned.leg.data:
         command += ["--data", str(Path(root) / planned.leg.data)]
     if "judge_endpoint" in planned.leg.prereqs and args.judge_model:
