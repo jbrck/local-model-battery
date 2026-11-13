@@ -1,0 +1,22 @@
+# Edge0-145B Q3_K -- a latent sparse MoE pack (Strata pack index v3) served by the
+# edge0-strata engine on one RTX 3080 20 GB.
+#
+# The pack's GGUF describes only the dense skeleton; the 40.81 GiB expert set lives in
+# experts.bin outside it and streams from host RAM through the engine's expert cache, so
+# the shape (48 hybrid-attention layers, 12 of them full attention, 2 KV heads, 256-wide
+# key/value, q8-equivalent KV) is left to the GGUF reader, which handles the recurrent
+# layers correctly. Only what no reader can reach is typed here: the quant label, the
+# total expert weight, and the drafter the serve actually loaded.
+
+id = "edge0-145b-q3k"
+
+# 40.81 GiB of expert weights, per the pack's own model.json and README. The 5.58 GB GGUF
+# is the skeleton only, so the probed weight figure is not the model's size.
+weights_gb = 40.81
+weight_quant = "Q3_K"
+quant = "Q3_K"
+
+# The serve runs the engine's built-in MTP drafter (--spec 4 --spec-min-p 0.5 --mtp
+# <pack>/mtp). Read off the launch: the engine reports the drafter it loaded.
+spec_decode = "on"
+draft_model = "mtp (edge0 built-in)"
