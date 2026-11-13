@@ -234,3 +234,85 @@ leg: when a leg fails for a reason that is not the model, the block has to say s
 import only runs when the tests load as a package. Without `-t .` a fresh clone reported three
 failures before the operator ran anything. A setup script that ends in a red suite is worse than no
 setup script.
+
+## The interpreter path pointed at a python that could not run the leg (2026-11-12)
+
+The entry above put an absolute path on the LCB leg: `/mnt/data/benchmark-venv/bin/python3`. Two
+things were wrong with it. Only the second one showed up in a test.
+
+That path is a symlink to `/usr/bin/python3`, and that interpreter cannot import `datasets` either.
+So the fix in the entry above moved the failure instead of removing it. The catalog's one
+machine-local path named an interpreter that would have failed this leg at minute zero, on the
+machine the path was written for.
+
+The capability check asked for the wrong module. It wanted `lcb_runner`, which no interpreter can
+supply: `adapters/lcb.py` puts the checkout on `sys.path` at run time (`--src`, defaulting to
+`LCB_SRC`), so that name only resolves inside the leg. The interpreter has to supply `datasets`.
+
+The leg now names a variable and a capability, never a path:
+
+```toml
+interpreter_env = "LCB_PYTHON"
+interpreter_imports = ["datasets"]
+```
+
+`resolve_interpreter` resolves in order: `LCB_PYTHON` in the environment, then
+`interpreters.LCB_PYTHON` in `standard.toml`, then a legacy absolute `interpreter`, then
+`sys.executable`, stamping which one won. The plan emits the `interpreter:<leg>` row only when the
+resolved path is not the orchestrator's own, and the row names the resolution source. The capability
+check imports `interpreter_imports` under the resolved interpreter and marks the leg `not run` when
+they are absent, so a path that cannot carry the leg fails at plan time instead of hours in.
+
+The catalog names the variable. The host names the path. A standard carrying
+`interpreters.LCB_PYTHON` keeps the catalog portable and still lets one machine override it from the
+environment.
+
+Lesson: a capability check is only worth having when it checks what the interpreter actually
+supplies. Checking a name the leg puts on `sys.path` itself proves nothing and passes nowhere.
+
+## The spec the battery is held to (2026-11-12)
+
+Four requirements, and where each stands:
+
+1. **Read the hardware, the model and the engines available.** Hardware and model are done
+   (`env_probe`, `model_probe`). Engines are not: nothing enumerates llama.cpp, vLLM, EXL3, Ollama
+   or Strata, and nothing maps a model to the engines that can serve it. Plan tasks 5, 6, 8.
+2. **Guide the operator through the variables that would change the score.** Done. The decision
+   rows carry chosen against alternative, the consequence and the source of each number, and
+   `variables.toml` records what each variable measured.
+3. **Run detached and save results along the way.** Neither exists. Plan tasks 11 and 12.
+4. **Output the report.** Missing, and the absence is self-inflicted: `3ffe4ce` deleted the v1
+   reporting toolchain (`report_scores.py`, `build_scoring_corpus.py`) and put nothing in its place.
+   Plan task 13.
+
+### Deviations
+
+**[Task 11 — 2026-11-12]**
+Spec said: `--status` reads `run.json`.
+Implemented: there is no `run.json`. The run directory holds `MANIFEST.json`, `run-plan.json`,
+`legs/*.result.json`, `logs/*.log` and `NOTES.md`. `--status` reads those.
+Reason: the plan named a file the orchestrator never wrote. A status command reading it would have
+reported every run as empty.
+
+**[Task 13 — 2026-11-12]**
+Spec said: the report reads `run.json` and the leg result files.
+Implemented: the same correction. The report reads `MANIFEST.json`, `run-plan.json` and
+`legs/*.result.json`.
+Reason: as above.
+
+**[Task 11 — 2026-11-12]**
+Spec said: re-execute under `setsid`.
+Implemented: `subprocess.Popen(..., start_new_session=True)`.
+Reason: that is the same syscall without depending on the `setsid` binary being installed or on
+shell quoting. The child's session is set before it can be signalled.
+
+### Design decisions
+
+**[Task 11 — 2026-11-12]**
+Category: Design Decision
+Spec: not specified
+Implemented: the pid file records the pid and the run directory together, and a pid whose process is
+alive but is not this run is called out as such.
+Reason: a bare pid file cannot tell a running battery from a recycled pid, and the second one reads
+as a hang. Liveness is checked with `os.kill(pid, 0)` and nothing is ever signalled.
+
