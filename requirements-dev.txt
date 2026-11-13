@@ -1,0 +1,14 @@
+# Gate tooling — what `quality-gauntlet` needs to read this repo.
+# The repo's own venv must be able to run both halves: pytest --cov for coverage and
+# radon for complexity. Run the gate with this venv's python, and it can also import
+# the legs, which need sympy from requirements.txt.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+#   .venv/bin/python /mnt/data/hermes/skills/quality-gauntlet/scripts/gauntlet.py \
+#       --src-dir scripts --test-dir tests --cov-module scripts
+#
+# Run it with the tool venv instead and every test module that imports a repo dependency
+# skips at collection, scores 0% coverage, and reports as a coverage failure.
+radon>=6.0
+pytest>=8.0
+pytest-cov>=5.0
