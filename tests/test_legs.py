@@ -93,9 +93,24 @@ class CatalogTest(unittest.TestCase):
     def test_shipped_catalog_validates_clean(self):
         self.assertEqual(validate_legs(self.legs, self.raw), [])
 
+    def test_a_shared_adapter_entry_declares_the_selector_that_tells_its_legs_apart(self):
+        """The ifeval/toolbench adapter serves two legs and requires --leg, so each leg's
+        entry command line has to carry its own selector or it exits 2 at argparse."""
+        by_id = {leg.id: leg for leg in self.legs}
+        self.assertEqual(by_id["ifeval"].args, ("--leg", "ifeval"))
+        self.assertEqual(by_id["toolbench"].args, ("--leg", "toolbench"))
+        for leg in self.legs:
+            if leg.entry == "scripts/adapters/ifeval_toolbench.py":
+                self.assertIn("--leg", leg.args, leg.id)
+
+    def test_a_leg_with_no_own_arguments_declares_none(self):
+        by_id = {leg.id: leg for leg in self.legs}
+        self.assertEqual(by_id["math500"].args, ())
+
     def test_to_dict_lists_every_field_the_manifest_records(self):
         leg = make_leg(prereqs=("lcb_data",), comparability_keys=("cap", "ctx"),
-                       known_failures=("flaky exit",), data="data/lcb.jsonl")
+                       known_failures=("flaky exit",), data="data/lcb.jsonl",
+                       args=("--leg", "sample"))
         payload = leg.to_dict()
         self.assertEqual(payload["id"], "sample")
         self.assertEqual(payload["measures"], "nothing")
@@ -108,6 +123,7 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(payload["items"], 10)
         self.assertEqual(payload["budget_floor"], 60)
         self.assertEqual(payload["data"], "data/lcb.jsonl")
+        self.assertEqual(payload["args"], ["--leg", "sample"])
 
 
 class ValidationTest(unittest.TestCase):

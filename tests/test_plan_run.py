@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from scripts.lib.env_probe import Gpu, HostFacts  # noqa: E402
 from scripts.lib.engine_facts import EngineFacts  # noqa: E402
+from scripts.lib.legs import Interpreter, load_legs  # noqa: E402
 from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
@@ -32,6 +33,7 @@ from scripts.lib.plan_run import (  # noqa: E402
     THINKING_CHOICES,
     _digit,
     _engine_version,
+    _interpreter_decision,
     _number,
     _pinned,
     budget_seconds,
@@ -770,6 +772,33 @@ class InterpreterSheetTest(unittest.TestCase):
         rows = [row.variable for row in plan(SMALL, selected=FREE).decisions]
         self.assertNotIn("interpreter:math500", rows)
         self.assertNotIn("interpreter:mmlu", rows)
+
+
+class InterpreterDecisionTest(unittest.TestCase):
+    """The row itself, built directly: the attribution of the choice is what has to hold,
+    whether or not a plan on this host gets far enough to build it."""
+
+    def leg(self):
+        return load_legs(STANDARD)[0]
+
+    def test_a_standard_or_declared_interpreter_is_attributed_to_the_standard(self):
+        for source in ("standard", "declared"):
+            with self.subTest(source=source):
+                interpreter = Interpreter(path="/opt/venv/bin/python3", source=source,
+                                          imports=("datasets",))
+                row = _interpreter_decision(self.leg(), interpreter)
+                self.assertEqual(row.variable, f"interpreter:{self.leg().id}")
+                self.assertEqual(row.kind, KIND_DEPENDENCY)
+                self.assertEqual(row.chosen, "/opt/venv/bin/python3")
+                self.assertEqual(row.source, "standard")
+
+    def test_an_interpreter_the_environment_supplies_is_attributed_to_the_host(self):
+        interpreter = Interpreter(path="/opt/venv/bin/python3", source="environment",
+                                  env_name="LCB_PYTHON", imports=("datasets",))
+        row = _interpreter_decision(self.leg(), interpreter)
+        self.assertEqual(row.source, "host")
+        self.assertIn("/opt/venv/bin/python3", row.consequence)
+        self.assertIn("environment", row.consequence)
 
 
 if __name__ == "__main__":

@@ -617,6 +617,7 @@ def plan_legs(legs: list[Leg], standard: dict, ctx: int, thinking_request: str,
                                   budget_s=budget_seconds(leg, cap, pilot, standard),
                                   case_timeout_s=pilot.case_timeout_s(cap),
                                   dependencies=dependencies, note=note,
+                                  extra_args=tuple(leg.args),
                                   interpreter=interpreter.path,
                                   interpreter_source=interpreter.source))
         decisions.append(_cap_decision(leg, cap, standard_cap, ctx))

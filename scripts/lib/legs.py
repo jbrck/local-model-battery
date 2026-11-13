@@ -65,6 +65,7 @@ class Leg:
     interpreter: str = ""
     interpreter_env: str = ""
     interpreter_imports: tuple[str, ...] = ()
+    args: tuple[str, ...] = ()
 
     @property
     def implemented(self) -> bool:
@@ -85,6 +86,7 @@ class Leg:
             "interpreter": self.interpreter,
             "interpreter_env": self.interpreter_env,
             "interpreter_imports": list(self.interpreter_imports),
+            "args": list(self.args),
         }
 
 
@@ -118,6 +120,7 @@ def load_legs(standard: dict, path: str = LEGS_FILE) -> list[Leg]:
             interpreter=str(raw.get("interpreter", "")),
             interpreter_env=str(raw.get("interpreter_env", "")),
             interpreter_imports=tuple(raw.get("interpreter_imports", ())),
+            args=tuple(str(item) for item in raw.get("args", ())),
         ))
     return legs
 
