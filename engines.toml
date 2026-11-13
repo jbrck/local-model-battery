@@ -81,6 +81,14 @@ shape_from = "the upstream engine, if the router reports it. Otherwise the windo
 effect = "The parameters in the run stamp are what was sent, not necessarily what arrived. A router can drop unsupported fields, rename the model, retry, or route a request to a different upstream than the last one. Latency and tokens per second include the router."
 compares_to = "nothing. Point at the engine directly when the numbers matter."
 
+[[engine]]
+id = "openai-compatible"
+serve = "not an engine either. Something answered an OpenAI-shaped /v1/models and nothing identified the software behind it: a bare local server, a wrapper, a gateway, or a hosted API standing in for one."
+smoke = "GET /v1/models, then one trivial completion. The list proves the endpoint answers, not that the engine is set up the way the run stamp claims."
+shape_from = "nothing. The window, slot count and cache behaviour are unknown, and this endpoint will not say."
+effect = "The run stamps a context window and a token cap it could not verify, and the engine may clamp, truncate, or ignore sampling parameters without saying so. Tokens per second is what this endpoint does, not what the model does."
+compares_to = "itself on the same endpoint, and nothing else. Identify the engine before comparing a number to any other run."
+
 
 # ── Drafters ──────────────────────────────────────────────────────────────────────────────────
 #
