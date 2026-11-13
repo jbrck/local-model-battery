@@ -191,10 +191,34 @@ class ScoreAnswerTest(unittest.TestCase):
         self.assertIsNone(result["mean"])
         self.assertIn("I cannot score", result["judge_error"])
 
-    def test_a_dead_endpoint_leaves_no_reply_to_quote(self):
+    def test_a_dead_endpoint_reports_the_transport_failure(self):
         result = self.score_with("unused", status=500)
         self.assertEqual(result["scores"], [])
-        self.assertEqual(result["judge_error"], "no reply")
+        self.assertIn("500", result["judge_error"])
+
+    def test_a_thinking_judge_is_named_instead_of_scored(self):
+        routes: dict[str, tuple[int, object]] = {
+            "/v1/chat/completions": (200, completion(
+                "", reasoning="Let me analyze the answer against the rubric. " * 40,
+                tokens=1200, finish_reason="length"))}
+        with JsonStub(routes) as stub:
+            self.judge.endpoint = stub.endpoint
+            result = score_answer(self.judge, TASK, "a haiku of three lines")
+        self.assertEqual(result["scores"], [])
+        self.assertIsNone(result["mean"])
+        self.assertIn("reasoning channel", result["judge_error"])
+        self.assertIn("1200", result["judge_error"])
+
+    def test_every_judge_call_asks_for_reasoning_off_at_temperature_zero(self):
+        routes: dict[str, tuple[int, object]] = {
+            "/v1/chat/completions": (200, completion(
+                judge_reply(("form", 8, "three lines"), ("sense", 5, "coheres"))))}
+        with JsonStub(routes) as stub:
+            self.judge.endpoint = stub.endpoint
+            score_answer(self.judge, TASK, "a haiku of three lines")
+            sent = stub.seen[-1]["body"]
+        self.assertEqual(sent["reasoning_effort"], "none")
+        self.assertEqual(sent["temperature"], 0.0)
 
     def test_an_answer_with_no_content_takes_the_floor_without_a_call(self):
         routes: dict[str, tuple[int, object]] = {

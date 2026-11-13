@@ -193,3 +193,44 @@ instead of letting a bare `ImportError` escape.
 Lesson: a leg that shells out to another venv's tool is fine, but a leg that *imports* from
 another venv has to run under that venv. Say which interpreter on the leg entry, or the run
 dies at minute zero with a message that blames the wrong component.
+
+## The judge is a second model, and it has its own failure modes
+
+The writing leg scores with `nous-glm-5-3-flash` through LiteLLM. As first wired it scored
+nothing, and every sign of that was quiet.
+
+`run_battery.py` forwards `--judge-model` and `--judge-endpoint` to the leg but never the key, and
+the leg defaulted `--judge-api-key` to `not-needed`. Behind a gateway that requires one, every
+judgement is a 401. Generation is a separate step, so the leg still wrote 84 answers and still
+passed.
+
+With the key in place the next failure was the model's dialect. GLM-5.3-flash is a thinking model:
+it spent the full 1200-token `JUDGE_MAX_TOKENS` budget in `reasoning_content` and returned an empty
+`content` with `finish_reason=length`, four calls out of four. `score_answer` called
+`chat_request(..., allow_reasoning_fallback=True)`, which handed the reasoning monologue to the JSON
+parser. Nothing parsed. `judge_scored=0, judge_errors=705`, and because the block's status came from
+generation the leg reported `pass` with `mean_score: 0.0` - a passing zero, which is the worst way
+to present a broken measurement.
+
+Three changes:
+
+- `judge.score_answer` posts through `post_chat` with `extra_body={"reasoning_effort": "none"}` and
+  reads `answer(allow_reasoning_fallback=False)`. A judge that only thinks is a judge that did not
+  score, and the fallback that hid it is gone. Measured after: 2.5-4.6 s per call, valid JSON, mean
+  2.83 on a deliberately bad answer (Hook 1, under the anchor) and 8.67 / 8.00 on a good one.
+- The key resolves `--judge-api-key`, then `WRITING_JUDGE_API_KEY`, then the run's `--api-key`, then
+  `not-needed`. The judge normally shares the run's gateway, so the run's key is the right default.
+- `unscored_judge` rewrites the block when `judge_scored` is 0: status `not scored`, the judge named,
+  the error count, and the first error quoted. `scoring_extra` carries `judge_first_error` to make
+  that possible.
+
+The diagnosis path matters as much as the fix. `_why_no_score` names the three cases in the order
+they happen - transport failure, reasoning-only reply, unparseable prose - so the next operator reads
+why the judge produced nothing instead of re-deriving it. Same shape as `wrong_interpreter` on the LCB
+leg: when a leg fails for a reason that is not the model, the block has to say so.
+
+`setup.sh` also ran `unittest discover -s tests` without `-t .`. `tests/__init__.py` points
+`BATTERY_DEFAULT_ENDPOINT` at a dead port so the endpoint guard has something to refuse, and that
+import only runs when the tests load as a package. Without `-t .` a fresh clone reported three
+failures before the operator ran anything. A setup script that ends in a red suite is worse than no
+setup script.

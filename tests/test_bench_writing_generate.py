@@ -3,8 +3,17 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
-from scripts.bench_writing_generate import build_user_message, main as bench_main
+from scripts.bench_writing_generate import (
+    JUDGE_API_KEY_ENV,
+    build_user_message,
+    main as bench_main,
+    parse_args,
+    resolve_judge_key,
+    scoring_extra,
+    unscored_judge,
+)
 
 
 def task(task_id: str, category: str, prompt: str, source: str | None = None) -> dict:
@@ -163,6 +172,113 @@ class SelfJudgeTest(LegCase):
         self.assertEqual(block["status"], "not scored")
         self.assertIn("model under test", block["reason"])
         self.assertEqual(len(self.gen.seen), 3)
+
+
+def judge_key_argv(*argv: str) -> list[str]:
+    """A full leg command line, so parse_args resolves the key the way a run would."""
+    return ["--model", "m", "--endpoint", "http://run/v1", "--data", "suite.json",
+            "--output-dir", "out", *argv]
+
+
+class JudgeKeyTest(unittest.TestCase):
+    """The judge key falls back to the run's key, because the judge sits behind it."""
+
+    def test_the_flag_beats_the_env_var_and_the_run_key(self):
+        with mock.patch.dict(os.environ, {JUDGE_API_KEY_ENV: "from-env"}):
+            options = parse_args(judge_key_argv("--judge-api-key", "from-flag",
+                                                "--api-key", "run-key"))
+        self.assertEqual(options.judge_api_key, "from-flag")
+
+    def test_the_env_var_is_used_when_the_flag_is_absent(self):
+        with mock.patch.dict(os.environ, {JUDGE_API_KEY_ENV: "from-env"}):
+            options = parse_args(judge_key_argv("--api-key", "run-key"))
+        self.assertEqual(options.judge_api_key, "from-env")
+
+    def test_the_run_key_is_the_fallback(self):
+        with mock.patch.dict(os.environ, {JUDGE_API_KEY_ENV: ""}):
+            options = parse_args(judge_key_argv("--api-key", "run-key"))
+        self.assertEqual(options.judge_api_key, "run-key")
+
+    def test_a_run_with_no_keys_at_all_asks_for_none(self):
+        with mock.patch.dict(os.environ, {JUDGE_API_KEY_ENV: ""}):
+            options = parse_args(judge_key_argv())
+        self.assertEqual(options.judge_api_key, "not-needed")
+
+    def test_the_resolver_is_a_plain_precedence_chain(self):
+        with mock.patch.dict(os.environ, {JUDGE_API_KEY_ENV: ""}):
+            self.assertEqual(resolve_judge_key("flag", "run"), "flag")
+            self.assertEqual(resolve_judge_key("", "run"), "run")
+            self.assertEqual(resolve_judge_key("", ""), "not-needed")
+
+
+class UnscoredJudgeTest(unittest.TestCase):
+    """A judge that parsed nothing is no score, not a zero."""
+
+    def extra(self, *errors: str) -> dict:
+        results = {f"T{index}": {"mean": None, "judge_error": error}
+                   for index, error in enumerate(errors)}
+        return scoring_extra(results, "judge-m", "http://judge/v1")
+
+    def test_the_first_error_is_carried_for_the_report(self):
+        extra = self.extra("first failure", "second failure")
+        self.assertEqual(extra["judge_errors"], 2)
+        self.assertEqual(extra["judge_first_error"], "first failure")
+        self.assertEqual(extra["judge_scored"], 0)
+
+    def test_a_judge_that_scored_nothing_reports_unscored(self):
+        block = unscored_judge(self.extra("the judge answered only on the reasoning channel"), 3)
+        self.assertEqual(block["status"], "not scored")
+        self.assertIn("no parseable score", block["reason"])
+        self.assertIn("reasoning channel", block["reason"])
+        self.assertNotIn("mean_score", block)
+        self.assertEqual(block["judge_scored"], 0)
+
+    def test_a_partial_judge_keeps_the_scores_it_has(self):
+        results = {"T1": {"mean": 7.0, "judge_error": None},
+                   "T2": {"mean": None, "judge_error": "boom"}}
+        extra = scoring_extra(results, "judge-m", "http://judge/v1")
+        self.assertEqual(extra["judge_scored"], 1)
+        self.assertEqual(extra["judge_errors"], 1)
+        self.assertEqual(extra["mean_score"], 7.0)
+
+
+def thinking_judge_routes(body: dict) -> tuple[int, dict]:
+    """A judge that spends the whole budget reasoning and never emits JSON."""
+    from tests.stub_json import completion
+
+    return 200, completion("", reasoning="Let me analyze the answer against the rubric. " * 40,
+                           tokens=1200, finish_reason="length")
+
+
+class ThinkingJudgeTest(LegCase):
+    """End to end: the failure that used to look like a passing zero."""
+
+    def setUp(self) -> None:
+        from tests.stub_json import JsonStub
+
+        super().setUp()
+        self.judge = JsonStub(thinking_judge_routes)
+        self.judge._thread.start()
+        self.addCleanup(self.judge.close)
+
+    def test_the_run_reports_unscored_with_the_reason(self):
+        code = self.run_leg("--judge-model", "judge-m", "--judge-endpoint", self.judge.endpoint,
+                            "--api-key", "run-key")
+        self.assertEqual(code, 0)
+        block = self.block()
+        self.assertEqual(block["status"], "not scored")
+        self.assertIn("no parseable score", block["reason"])
+        self.assertIn("3 judge errors", block["reason"])
+        self.assertNotIn("mean_score", block)
+        self.assertEqual(self.sample("T1")["response"][:10], "ANSWER FOR")
+
+    def test_the_judge_request_carries_reasoning_off_and_the_run_key(self):
+        self.run_leg("--judge-model", "judge-m", "--judge-endpoint", self.judge.endpoint,
+                     "--api-key", "run-key")
+        sent = self.judge.seen[0]
+        self.assertEqual(sent["body"]["reasoning_effort"], "none")
+        headers = {key.lower(): value for key, value in sent["headers"].items()}
+        self.assertEqual(headers["authorization"], "Bearer run-key")
 
 
 if __name__ == "__main__":

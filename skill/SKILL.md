@@ -30,6 +30,7 @@ sheet, and taking that decision stamps the run off-standard instead of quietly c
 | items file | the leg's `data` path, hashed into the manifest | 4096-capped MMLU and 16384-capped MMLU are the same items and different scores |
 | a leg's interpreter | the leg's `interpreter` in `legs.toml` | a leg whose helpers come from an outside checkout cannot import under the orchestrator's own interpreter. The declared path must be absolute. Wrong path means the leg reports `not run` before its first item |
 | judge model | `standard.toml [judge] model`, unless `--judge-model` overrides it | the judge is a comparability key: two runs only compare when the same model scored both. The judge endpoint stays the operator's, and an empty one means the endpoint the run itself uses |
+| judge reasoning | `JUDGE_EXTRA_BODY` in `scripts/lib/judge.py` | a thinking judge burns its whole 1200-token budget in the reasoning channel and returns no JSON at all, so nothing parses. `reasoning_effort: none` is what makes the score reachable |
 
 ## Step 1: serve the model
 
@@ -211,7 +212,7 @@ Ask the planner what a host will actually run before starting a 14-leg day. Ever
 
     python3 scripts/plan_run.py --profile profiles/<name>.toml --no-probe --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['legs']),'run,',len(d['skips']),'skipped'); [print('  skip', s['leg'], '-', s['reason']) for s in d['skips']]"
 
-On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing is the fourteenth, and no env var reaches it: the standard pins the judge model (`nous-glm-5-3-flash`), so nothing needs exporting, but the leg only scores when that endpoint answers. Without a reachable judge it generates every answer and reports itself `not scored` with the reason, exit 0. Generation and scoring are separate steps, so a judge that was down costs a re-score, never a regeneration. `--judge-model` still wins when you want a different judge; the plan sheet then labels the source `(profile)` instead of `(standard)`.
+On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing is the fourteenth, and the standard pins its judge model (`nous-glm-5-3-flash`), so nothing needs exporting for the judge model itself — but the leg only scores when that endpoint answers. The judge's key comes from `--judge-api-key`, then `WRITING_JUDGE_API_KEY`, then the run's own `--api-key`. Without a reachable judge it generates every answer and reports itself `not scored` with the reason, exit 0. Generation and scoring are separate steps, so a judge that was down costs a re-score, never a regeneration. `--judge-model` still wins when you want a different judge; the plan sheet then labels the source `(profile)` instead of `(standard)`.
 
 ## A leg that says in_repo is not a ported leg
 
@@ -234,6 +235,16 @@ Once every leg is on the contract, `scripts/lib/reporting.py` and `scripts/lib/m
 Scope the report to the files you touched rather than reading it repo-wide, and group it into `file:line [method] reason` pairs first: the raw output lists each method once per gate, so an ungrouped read looks three times worse than it is.
 
 The v1 scoring toolchain is deleted (`report_scores.py`, `validate_suite.py`, `score_writing.py`, `build_scoring_corpus.py`, `lib/reporting.py`) along with the test that only covered it. That is the pattern for whatever debt remains here: delete what nothing calls before writing a test to defend it, then split the too-complex methods and cover the error branches. Full order, report parser and the parallel worker brief: `quality-gauntlet` → `references/clearing-gate-debt.md`.
+
+## The judge is the second model in the run
+
+The writing leg is the only leg that needs another model to produce a number. Three things break it, and all three read like a model that cannot write.
+
+- **The judge key.** The judge usually sits behind the same gateway as the run endpoint, so `--judge-api-key` falls back to `WRITING_JUDGE_API_KEY`, then to the run's own `--api-key`. It used to default to `not-needed`, which made every judgement a 401 while generation still passed.
+- **The judge's reasoning.** A thinking judge spends the whole `JUDGE_MAX_TOKENS` budget (1200) in `reasoning_content` and returns an empty `content`, so no judgement ever parses. Measured on `nous-glm-5-3-flash`: 1200 reasoning tokens, `finish_reason=length`, empty content, zero scores, four calls out of four; with `reasoning_effort: "none"` the same call returns 279 tokens of JSON in 1.9 s. `judge.score_answer` sends that body on every call and never reads the reasoning channel, because a monologue is not a score. `nous-gpt-oss-120b` fails the same way, and `thinking: {"type": "disabled"}` is ignored. Qualify a new judge with one call before a 705-judgement run.
+- **A judge that parses nothing.** `judge_scored: 0` beside `mean_score: 0.0` reads in the manifest like a bad writer. The leg now reports `not scored`, names the judge and the failure count, and quotes the first `judge_error`. Zero parsed judgements is no score, not a low one.
+
+Judge quality on this stack, on the XP-001 task with a deliberately bad and a deliberately good answer, two calls each: bad 2.83 twice (Hook 1, below the 2 anchor), good 8.67 and 8.00. It separates the two hard, repeats exactly on the bad answer, and moves ±0.7 on the good one at temperature 0, so treat about 0.7 of the mean as the writing column's noise floor before reading a gap between two models.
 
 ## Pitfalls
 

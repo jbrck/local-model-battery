@@ -62,7 +62,8 @@ class JsonStub:
 
     def respond(self, handler: BaseHTTPRequestHandler, body: dict | None) -> None:
         """Record the request, then answer from the route table."""
-        self.seen.append({"path": handler.path, "body": body})
+        self.seen.append({"path": handler.path, "body": body,
+                          "headers": dict(handler.headers.items())})
         if self.delay_s:
             time.sleep(self.delay_s)
         route = self.routes

@@ -40,7 +40,7 @@ echo "==> Checking the catalog..."
 python3 scripts/check_catalogs.py
 
 echo "==> Running tests..."
-python3 -m unittest discover -s tests -q
+python3 -m unittest discover -s tests -t . -q
 
 echo ""
 echo "==> Setup complete."
@@ -59,3 +59,4 @@ echo "Writing scores need a judge model that is not under test:"
 echo "     python scripts/bench_writing_generate.py --model MyModel \\"
 echo "       --judge-model nous-glm-5-3-flash \\"
 echo "       --judge-endpoint http://localhost:4000/v1"
+echo "     (the judge reuses the run's --api-key; pass --judge-api-key when they differ)"

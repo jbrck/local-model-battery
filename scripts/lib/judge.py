@@ -6,11 +6,20 @@ from __future__ import annotations
 import json
 import re
 
-from scripts.lib.model import ModelConfig, chat_request
+from scripts.lib.model import ChatResponse, ModelConfig, post_chat
 
 SCORE_MIN = 1
 SCORE_MAX = 10
 JUDGE_MAX_TOKENS = 1200
+
+JUDGE_EXTRA_BODY = {"reasoning_effort": "none"}
+"""Keeps a thinking judge from spending the whole budget in the reasoning channel.
+
+Measured on nous-glm-5-3-flash: with reasoning on, every call came back with 1200
+reasoning tokens, finish_reason=length and an empty content field, so no judgement ever
+parsed. With reasoning_effort none the same call returns 279 tokens of JSON in under two
+seconds. Servers that do not know the parameter drop it.
+"""
 
 JUDGE_SYSTEM = """You score a single piece of writing against a fixed rubric.
 
@@ -129,7 +138,7 @@ def score_answer(judge: ModelConfig, task: dict, answer: str) -> dict:
         }
 
     criteria = [criterion["criterion"] for criterion in task["rubric"]]
-    raw = chat_request(
+    response = post_chat(
         judge,
         [
             {"role": "system", "content": JUDGE_SYSTEM},
@@ -137,11 +146,13 @@ def score_answer(judge: ModelConfig, task: dict, answer: str) -> dict:
         ],
         max_tokens=JUDGE_MAX_TOKENS,
         temperature=0.0,
+        extra_body=JUDGE_EXTRA_BODY,
     )
+    raw = response.answer(allow_reasoning_fallback=False)
     parsed = parse_scores(raw, criteria)
     if parsed is None:
         return {"scores": [], "mean": None, "empty": False,
-                "judge_error": _excerpt(raw)}
+                "judge_error": _why_no_score(response, raw)}
 
     mean = sum(entry["score"] for entry in parsed) / len(parsed)
     return {"scores": parsed, "mean": round(mean, 3), "empty": False,
@@ -153,6 +164,18 @@ def _excerpt(raw: str | None) -> str:
     if not raw:
         return "no reply"
     return re.sub(r"\s+", " ", raw)[:200]
+
+
+def _why_no_score(response: ChatResponse, raw: str | None) -> str:
+    """Why no score came back, named in the order the causes actually happen."""
+    if not response.ok:
+        return _excerpt(str(response.error or "no reply"))
+    if not response.content and response.reasoning:
+        stop = response.finish_reason or "unstated"
+        return (f"the judge answered only on the reasoning channel ({response.completion_tokens} "
+                f"tokens, finish {stop}), so there is no score to parse: cut the judge's "
+                "reasoning effort or raise its token limit")
+    return _excerpt(raw)
 
 
 def resolve_judge_defaults(model: str, endpoint: str, run_endpoint: str,

@@ -3,7 +3,9 @@
 
 Generation is unconditional and writes every sample plus the result block.
 Scoring uses the blind rubric judge in scripts.lib.judge, driven by
---judge-model/--judge-endpoint or WRITING_JUDGE_MODEL/WRITING_JUDGE_ENDPOINT.
+--judge-model/--judge-endpoint/--judge-api-key or WRITING_JUDGE_MODEL,
+WRITING_JUDGE_ENDPOINT and WRITING_JUDGE_API_KEY. The judge key falls back to the run's
+--api-key, because the judge usually sits behind the same gateway.
 With no judge the leg reports itself not scored, names what is missing, exits 0.
 """
 from __future__ import annotations
@@ -36,6 +38,7 @@ WRITING_TEMPERATURE = 0.7
 SOURCE_HEADER = "\n\nSOURCE TEXT:\n"
 JUDGE_MODEL_ENV = "WRITING_JUDGE_MODEL"
 JUDGE_ENDPOINT_ENV = "WRITING_JUDGE_ENDPOINT"
+JUDGE_API_KEY_ENV = "WRITING_JUDGE_API_KEY"
 
 
 def build_user_message(task: dict) -> str:
@@ -138,16 +141,70 @@ def run_scoring(args: LegArgs, tasks: list[dict], samples: dict[str, dict],
     return scoring_extra(results, judge_model, judge_endpoint)
 
 
+def scored_items(results: dict[str, dict]) -> dict[str, dict]:
+    """The judgements that produced a number."""
+    return {tid: item for tid, item in results.items() if item["judge_error"] is None}
+
+
+def judge_errors(results: dict[str, dict]) -> list[str]:
+    """Every judge failure, in task order."""
+    return [item["judge_error"] for item in results.values() if item["judge_error"]]
+
+
+def first_error(errors: list[str]) -> str:
+    """The first judge failure, or empty when there was none."""
+    return errors[0] if errors else ""
+
+
+def mean_or_zero(means: list[float]) -> float:
+    """The mean of what was scored, or 0.0 when nothing was."""
+    return round(sum(means) / len(means), 3) if means else 0.0
+
+
 def scoring_extra(results: dict[str, dict], judge_model: str, judge_endpoint: str) -> dict:
-    scored = {tid: item for tid, item in results.items() if item["judge_error"] is None}
-    means = [item["mean"] for item in scored.values()]
+    scored = scored_items(results)
+    errors = judge_errors(results)
     return {
         "judge_model": judge_model,
         "judge_endpoint": judge_endpoint,
         "judge_scored": len(scored),
-        "judge_errors": len(results) - len(scored),
-        "mean_score": round(sum(means) / len(means), 3) if means else 0.0,
+        "judge_errors": len(errors),
+        "judge_first_error": first_error(errors),
+        "mean_score": mean_or_zero([item["mean"] for item in scored.values()]),
         "scores": {tid: item["mean"] for tid, item in results.items()},
+    }
+
+
+def resolve_judge_key(explicit: str, run_key: str) -> str:
+    """The judge's key: its own flag, then its env var, then the run's key.
+
+    The judge usually sits behind the same gateway as the run endpoint, so the run's key
+    is the right fallback. Defaulting to "not-needed" instead makes every judgement a 401
+    while generation still passes, which reads like a model that cannot write.
+    """
+    return explicit or os.environ.get(JUDGE_API_KEY_ENV, "") or run_key or "not-needed"
+
+
+def unscored_judge(extra: dict, tasks: int) -> dict:
+    """A judge that parsed nothing is no score, not zero.
+
+    With every judgement failed, mean_score sits at 0.0 and judge_scored at 0, which the
+    manifest would show as a model that wrote badly. Report it as unscored and quote the
+    first failure so the run says what actually happened.
+    """
+    first = extra.get("judge_first_error") or ""
+    reason = (f"judge {extra['judge_model']} returned no parseable score for any of the "
+              f"{tasks} tasks ({extra['judge_errors']} judge errors)")
+    if first:
+        reason += f"; first: {first}"
+    return {
+        "status": "not scored",
+        "reason": reason,
+        "judge_model": extra["judge_model"],
+        "judge_endpoint": extra["judge_endpoint"],
+        "judge_scored": 0,
+        "judge_errors": extra["judge_errors"],
+        "judge_first_error": first,
     }
 
 
@@ -190,16 +247,18 @@ def parse_args(argv: list[str] | None) -> Options:
                         help=f"scoring judge; falls back to {JUDGE_MODEL_ENV}")
     parser.add_argument("--judge-endpoint", default="",
                         help=f"judge base URL; falls back to {JUDGE_ENDPOINT_ENV}")
-    parser.add_argument("--judge-api-key", default="not-needed")
+    parser.add_argument("--judge-api-key", default="",
+                        help=f"judge key; falls back to {JUDGE_API_KEY_ENV}, then --api-key")
     namespace = parser.parse_args(argv)
     fields = {name: vars(namespace)[name] for name in LegArgs.__dataclass_fields__}
+    leg_args = LegArgs(**fields)
     return Options(
-        args=LegArgs(**fields),
+        args=leg_args,
         categories=list(namespace.category or []),
         skip_existing=namespace.skip_existing,
         judge_model=namespace.judge_model or os.environ.get(JUDGE_MODEL_ENV, ""),
         judge_endpoint=namespace.judge_endpoint or os.environ.get(JUDGE_ENDPOINT_ENV, ""),
-        judge_api_key=namespace.judge_api_key,
+        judge_api_key=resolve_judge_key(namespace.judge_api_key, leg_args.api_key),
     )
 
 
@@ -217,6 +276,9 @@ def main(argv: list[str] | None = None) -> int:
     if has_judge and options.judge_model != args.model:
         extra = run_scoring(args, selected, samples, options.judge_model,
                             options.judge_endpoint, options.judge_api_key)
+        if not extra["judge_scored"]:
+            extra = unscored_judge(extra, len(selected))
+            print(f"not scored: {extra['reason']}", file=sys.stderr)
     else:
         extra = not_scored(args.model, options.judge_model, options.judge_endpoint)
         if tally.status() != "pass":
