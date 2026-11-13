@@ -1,0 +1,118 @@
+# What each inference engine, and the drafter running in front of it, does to a measurement.
+#
+# This file is knowledge, not integration. The battery installs nothing and configures nothing.
+# It reads the host, reads the model, takes the entry matching the engine it is pointed at, and
+# uses it to decide whether the combination is worth testing, to say what each setting does to
+# the result, and to hand the agent standing it up the right direction.
+#
+# Two rules for every row:
+#   1. No host, card, model or person is named. Anyone can run this anywhere.
+#   2. A row may say a number is not comparable. It must then say what it *is* comparable to.
+#
+# Engine fields:
+#   id          how the battery recognises the engine
+#   serve       how a host is normally stood up, and what to watch for
+#   smoke       the one check that proves it is up and returns the real window
+#   shape_from  where the truth about the model lives, for this engine
+#   effect      what it does to the numbers
+#   compares_to what its results may be compared against
+
+[[engine]]
+id = "llama.cpp"
+serve = "llama-server with the model, one process and one model at a time. Context and slot count are launch flags, not defaults, so they must be set deliberately and recorded."
+smoke = "GET /props and read n_ctx, model_path and the chat template. If the template is empty the model has none embedded and the served formatting is whatever the client sent."
+shape_from = "GET /props on the running server. The server's own flags are the truth about the window. A file name or a model card is not."
+effect = "One request stream. Nothing batches behind you, so served tokens per second is single-stream tokens per second. Context and slots are explicit and settable. This is the reference the other engines are read against."
+compares_to = "itself, and other llama.cpp runs at the same context, slot count and quant."
+
+[[engine]]
+id = "vllm"
+serve = "vllm serve. It loads safetensors, not GGUF, so a GGUF on the host is irrelevant to it. Concurrency is a server setting and it defaults to more than one."
+smoke = "GET /v1/models and read max_model_len, which is the window it will actually serve. GET /version identifies the build."
+shape_from = "GET /v1/models (max_model_len) plus GET /version. The model directory's config.json is the second opinion."
+effect = "Continuous batching. Concurrent requests raise aggregate throughput and move per-request latency, so served tokens per second is throughput, not single-stream speed. Paged attention means the KV cache is not a knob: per-slot KV quant and flash-attention flags do not exist here. Either pin concurrency to one or stamp the run as multi-stream."
+compares_to = "other vllm runs at the same concurrency. Single-stream engines only if batching was pinned to one request."
+
+[[engine]]
+id = "sglang"
+serve = "sglang.launch_server. Batching plus a radix prefix cache, both on by default."
+smoke = "GET /get_model_info and read the model path and context length it reports."
+shape_from = "GET /get_model_info for the loaded model and its context."
+effect = "Two effects, and the second is the one that surprises people. Batching, as above. And prefix caching: a prompt the server has already seen is served from cache and reports inflated tokens per second. Anything that repeats a long shared prefix (a fixed system prompt, best-of-N) inflates. Disable the cache or use unique prompts when throughput is the number you care about."
+compares_to = "itself, with prefix caching off, at the same concurrency."
+
+[[engine]]
+id = "ollama"
+serve = "ollama serve plus the model, or a container wrapping it. It manages memory and model loading itself, and its own small default context applies until something sets it higher."
+smoke = "GET /api/show on the native API and read model_info, the quantization and parameters.num_ctx. The OpenAI-compatible /v1 side does not report the window, so smoke test the native API even if the runs go through /v1."
+shape_from = "GET /api/show. Never the tag name: a tag that says 128k can be served at a much smaller default window."
+effect = "A layer with its own defaults sits between the battery and the model. It can shorten the context, ignore or rewrite sampling parameters, and keep a model resident between runs. Temperature and seed may not survive the trip. The window in the run stamp has to come from /api/show or it is a guess."
+compares_to = "itself and other ollama runs. Not to a server where the context and sampling were set explicitly."
+
+[[engine]]
+id = "exllama"
+serve = "the exllamav3 server, or the exl3/exl2 loader. It serves its own quantization format, not GGUF."
+smoke = "the server's model list or startup output for the loaded quant and the context it was launched with."
+shape_from = "the loader's configuration for the quant and the launch context. There is no GGUF header to read and none of the GGUF-derived math applies."
+effect = "Quantization-native: the kernel, the KV cache precision and the achieved speed all differ from llama.cpp on weights from the same source. The same nominal model is a different measurement here. Batching exists but is not what the basic server does by default; when enabled it carries the vllm caveat."
+compares_to = "other exllama runs on the same quant and context, not to llama.cpp."
+
+[[engine]]
+id = "strata"
+serve = "the strata server. It runs a drafter alongside the target model by default, choosing between the drafters it has for the target rather than being told, so identical settings can load different drafters on different hosts. Which drafter the server actually loaded is launch configuration and belongs in the run stamp."
+smoke = "the server's health and model endpoints for the loaded model, its context, and which drafter it reports loading. Read the drafter off the server, never off the setting: what it loaded is the fact."
+shape_from = "the server's startup report and its API. The window is what it was launched with."
+effect = "Whatever the loaded drafter does to speed, it does here, and it is large enough to swamp the model's own contribution to tokens per second. See the drafter rows below. Quality should match the target model's distribution, but it is not guaranteed bit-identical, so a score is a score from that configuration."
+compares_to = "itself under the same target and the same drafter. Its tokens per second to no other engine."
+
+[[engine]]
+id = "mlx"
+serve = "mlx_lm.server or mlx_lm.generate on Apple silicon. It loads MLX weights, not GGUF, and the model directory carries its own config.json."
+smoke = "GET /v1/models if the server offers it, plus the model directory's config.json for depth and head counts. The window is set at launch."
+shape_from = "the MLX model directory's config.json plus the server's startup output."
+effect = "Unified memory. There is no separate video memory: the model, the cache and everything else the machine is doing share one pool, so the ceiling depends on what else is resident and moves during the run. Fit math written for a discrete accelerator does not apply. No CUDA, so no flash-attention or KV-quant flags. Speed is memory-bandwidth-bound, and the first request pays load cost."
+compares_to = "itself, and other mlx runs on the same chip and memory size."
+
+[[engine]]
+id = "proxy"
+serve = "not an engine. Any OpenAI-compatible router or gateway in front of a real one."
+smoke = "GET /v1/models, and check whether the router will say which upstream served a request. Alias names often appear here instead of real model names."
+shape_from = "the upstream engine, if the router reports it. Otherwise the window is unknown and the run is not comparable to anything."
+effect = "The parameters in the run stamp are what was sent, not necessarily what arrived. A router can drop unsupported fields, rename the model, retry, or route a request to a different upstream than the last one. Latency and tokens per second include the router."
+compares_to = "nothing. Point at the engine directly when the numbers matter."
+
+
+# ── Drafters ──────────────────────────────────────────────────────────────────────────────────
+#
+# A drafter is not an engine. It is a speculative decoding method any supporting engine can run
+# alongside the target model, so this axis cuts across every row above: llama.cpp carries one
+# upstream, strata runs one by default, and a vllm deployment can serve a checkpoint trained for
+# one. It changes speed, not intent, and it changes speed by more than most models differ from
+# each other, so tokens per second is not comparable across drafters.
+#
+# The two in circulation trade places by context length, which is why a run has to say which one
+# it used rather than "speculative decoding on".
+#
+# Drafter fields:
+#   id          how the battery recognises it
+#   tells       how to spot it before running anything
+#   effect      what it does to the numbers
+#   compares_to what its results may be compared against
+
+[[drafter]]
+id = "none"
+tells = "the engine started with drafting off, or with no drafter available for the target."
+effect = "Decode at the target model's own speed. This is the baseline the drafters are measured against, and the only configuration whose speed says something about the model rather than about the drafter."
+compares_to = "other runs with no drafter, same engine, context and quant."
+
+[[drafter]]
+id = "mtp"
+tells = "a multi-token prediction head inside the checkpoint itself, so there are no separate drafter weights and nothing extra to download. Some checkpoints ship one and some do not."
+effect = "Roughly doubles decode speed at short context in the measurements on hand. The advantage fades as context grows, where draft acceptance falls off with draft length. Speed is workload-dependent: the same head on a different prompt mix lands somewhere else."
+compares_to = "itself at the same draft length. Not to a run with no drafter or a different one."
+
+[[drafter]]
+id = "dflash2"
+tells = "separate drafter weights, small (order of a gigabyte), which the engine reports loading. It proposes a whole block of tokens in one parallel pass rather than one token at a time, and it carries its own quantization and block size."
+effect = "Beats no speculation by a wide margin, and beats the prediction-head drafter past moderate context, close to the opposite of that drafter's short-context advantage. Reported gains do not hold at one number across targets, prompts, hardware and configuration, so any figure is a figure for this configuration. Output should match the target model's distribution, but it is not guaranteed bit-identical."
+compares_to = "itself under the same drafter quant and block size. Not to the prediction-head drafter, not to no drafter, not to another host."

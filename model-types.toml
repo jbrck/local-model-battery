@@ -1,0 +1,48 @@
+# What each kind of model does to a measurement.
+#
+# Same rules as engines.toml: knowledge, not integration. No host, card, model or person is
+# named. A row that says a number is not comparable has to say what it is comparable to.
+#
+# These cut across engines. A reasoning MoE on vllm is read through both files.
+#
+# Fields:
+#   id      what the battery sees in the model, and how it recognises it
+#   tells   how to spot it before running anything
+#   effect  what it does to the numbers
+#   advice  what the run has to set or record because of it
+
+[[model_type]]
+id = "dense"
+tells = "every layer has the same attention shape and the parameter count is what the file implies."
+effect = "Nothing unusual. The cache grows with context at a predictable rate and speed scales with size and quant."
+advice = "No special handling. The window and cap can be computed from the file's own metadata."
+
+[[model_type]]
+id = "sparse_moe"
+tells = "expert counts in the metadata, or a total parameter count far above the active one. A model described as 125B with 6B active is this."
+effect = "Memory is set by the total, because every expert is resident. Speed is set by the active subset, so it runs like a much smaller model while occupying the space of a large one. Throughput is therefore not comparable to a dense model of the same total size, and quality is the only axis that compares cleanly."
+advice = "Size the host against the total, not the active count. Record both numbers. Never explain a quality gap with throughput or the reverse."
+
+[[model_type]]
+id = "hybrid_recurrent"
+tells = "two shapes in the metadata: attention layers mixed with linear or recurrent ones, sometimes reported as several key-value head counts in one list."
+effect = "There is no single cache size per layer. Some layers hold no growing cache at all, others hold a fixed state, and the window may be capped by design rather than by memory. A cache formula written for a dense model overstates the requirement badly, and the mistake looks like a model that should not fit but does."
+advice = "Read the cache from the model's own metadata, per layer. Never from a formula, and never from another model's numbers. A hand-typed profile for one of these is wrong in a way that is hard to see."
+
+[[model_type]]
+id = "reasoning"
+tells = "the model emits a reasoning or thinking block before its answer, or the card says it can. Usually toggled by a chat-template variable or a reasoning parameter."
+effect = "The reasoning block is spent from the same cap as the answer. A cap that is generous for a normal model will truncate a reasoning model before it answers, and the run then scores a truncated response, not a wrong one. The distinction matters: a starved model and a weak model look identical in a score."
+advice = "Decide thinking on or off and record it with every score. Count truncated answers as hits against the cap, separately from wrong answers, and report them next to the score. A small reasoning model can spend its whole cap thinking, so the cap matters most exactly where it is easiest to get wrong."
+
+[[model_type]]
+id = "long_context"
+tells = "a large declared window, or a use case that needs one."
+effect = "Cost scales with the cap, and on a small host the cache is what limits the window rather than the weights. The legs that send long prompts become the expensive ones and the ones most likely to hit a wall-clock budget."
+advice = "Treat context as a first-class setting, not a default. Pilot the slowest leg first to size the budget. Quote the window the run used, never the window the model advertises."
+
+[[model_type]]
+id = "quantized"
+tells = "a quant name in the file, and a size well below the parameter count at full precision."
+effect = "The weights are part of the result. The same model at two quants is two entries, and a score from one does not transfer to the other. Speed also moves with the quant: a smaller file is not only smaller, it is faster."
+advice = "Quote the quant with every score. Keep the quant in the run stamp so a comparison between two runs can refuse to happen when they differ."

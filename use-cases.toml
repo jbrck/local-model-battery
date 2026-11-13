@@ -1,0 +1,60 @@
+# How a use case picks the settings.
+#
+# The question at the top of a run decides everything under it. Which legs, how much context, whether
+# reasoning runs, and how many repeats. A run that does not name its use case cannot be compared to
+# anything, including another run of itself.
+#
+# Same rules as engines.toml: no host, card, model or person is named.
+#
+# These four are the ones worth supporting. Each one is honest about what it cannot tell you, which
+# is the part that stops a score from being read as an answer to a question it never asked.
+#
+# Fields:
+#   id          the --use-case value
+#   question    what the run is meant to answer
+#   legs        which legs earn their place
+#   cap         how much context the run needs, and why
+#   thinking    reasoning on or off, and what that does
+#   sampling    temperature, seed and repeats
+#   records     what has to be written down beside the score
+#   cannot_say  what this run must not be used to claim
+
+[[use_case]]
+id = "ranking"
+question = "Which of these models do I want, judged on answer quality alone?"
+legs = "the scored legs: math500, humaneval_plus, gpqa_diamond, instr_v2, ifeval, ifbench, toolbench, mmlu, reasoning, refusal, hermesagent20, lcb, writing. selftest is excluded: it proves the harness works, it does not score the model."
+cap = "the plan's cap per leg, with headroom. The cap has to be generous enough that a truncated answer cannot be mistaken for a wrong one, because this use case is the one where that mistake changes the verdict."
+thinking = "as the model intends it, recorded with every score. Forcing thinking off to make models comparable measures them as something they are not; leaving it on and recording it is honest, and a model that thinks when it was not asked to is a finding, not a nuisance."
+sampling = "temperature 0, seed fixed, one run per case. Add repeats only where two models land within noise of each other, and repeat both, not one."
+records = "per-leg score, cap used, whether thinking ran, quant, engine, drafter and concurrency. The cap-hit count belongs beside the score, not in a footnote."
+cannot_say = "nothing about speed. Nothing about whether the winner is fast enough to use, or whether it fits the work. A ranking is a quality ordering and that is all it is."
+
+[[use_case]]
+id = "throughput"
+question = "How fast does this model run on this engine, as configured here?"
+legs = "the two cheapest representative shapes: one short generation and one long prompt. Speed work does not need the scored legs, and running them wastes the time the run is trying to measure."
+cap = "the cap the model will actually be served at in use, not the maximum the file allows. A speed at a context nobody uses is not a useful speed."
+thinking = "off, and recorded as off. A reasoning model spends the measured window thinking, so its tokens per second is a rate at which it thinks, not a rate at which it answers."
+sampling = "temperature 0, fixed seed, fixed prompt, and the same stream count for every run being compared. One request in flight at a time, or the run is a throughput test and must say so."
+records = "tokens per second, time to first token, context, quant, engine, drafter, concurrency, and how long the server had been up. Every one of those moves the number."
+cannot_say = "nothing about quality. Speed is not evidence of capability, and a fast model that answers wrong answers fast."
+
+[[use_case]]
+id = "capability"
+question = "Does it hold up when the task is hard, or does it fall apart under load?"
+legs = "the hard legs only: lcb, gpqa_diamond, humaneval_plus, toolbench, hermesagent20. These are the ones where a weak model produces a visibly weak result."
+cap = "the large caps these legs need, plus headroom for reasoning. lcb in particular is the expensive leg and the one most likely to hit a wall-clock budget, so pilot it first to size the run."
+thinking = "on, with the cap to support it. This use case is the one where a starved model and a weak model produce the same score, so the cap-hit count is not optional here."
+sampling = "temperature 0, seed fixed, one run per case. Two repeats where a single leg decides the answer."
+records = "per-leg score, cap hits separated from wrong answers, wall-clock per leg, and the cap used. A capability run that does not report cap hits is unreadable."
+cannot_say = "nothing about the legs it skipped, and nothing about a model's character from one leg. A model can pass the hard leg and be unusable for the easy work."
+
+[[use_case]]
+id = "daily-driver"
+question = "Would I actually use this model for the work I do?"
+legs = "the workflow legs matching the work: writing and instr_v2 for drafting, toolbench for tool use, reasoning and math500 for analysis. Pick your own mix, name it, and keep it fixed between runs or the comparison is meaningless."
+cap = "the context the work actually needs. A writing task does not need the same window as a repository-wide code task, and paying for a window you do not use changes what the run costs in time and memory."
+thinking = "per the work: on where the task needs reasoning, off where it needs the answer now. Record which, both ways, because a model that thinks through a chat reply is a different tool than one that does not."
+sampling = "temperature 0 for anything scored, the working temperature where the work itself is not deterministic. One run per case, then a second pass on the legs that land close."
+records = "the workflow set used, the cap, thinking on or off, per-leg score, and the wall-clock for the whole run. If the run would not fit in the time you have, the model has failed this use case regardless of its score."
+cannot_say = "nothing about peak capability, and nothing about a workload that is not in the set. This is a fit check for your work, not a verdict on the model."
