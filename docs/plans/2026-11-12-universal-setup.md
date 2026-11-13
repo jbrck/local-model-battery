@@ -21,6 +21,24 @@
 
 ---
 
+## Status
+
+| Task | State | Where |
+|---|---|---|
+| 1-4 model_probe | **done** | `53af9ca` |
+| 5-6 engine_facts | not started | |
+| 7 plan from the probed shape | **done** | `dbf3152` |
+| 8 engine-shaped decisions | not started | |
+| 9 interpreter | **done** | `f95a842` |
+| 10 docs, skill, gate | not started | |
+| 11 detached run | not started | new: requirement 3 |
+| 12 save along the way | not started | new: requirement 3 |
+| 13 the report | not started | new: requirement 4 |
+
+Tasks 1-4, 7 and 9 are in. Task 9 shipped in a different shape than written below; the divergence is recorded in that task.
+
+---
+
 ## Task 1: `ModelShape` and the GGUF header reader
 
 **Objective:** Read a model's numbers from its GGUF header with pure stdlib.
@@ -293,28 +311,27 @@ EXL3's always-on reasoning already behaves correctly in `resolve_thinking`. Add 
 
 ---
 
-## Task 9: Remove the hardcoded interpreter path
+## Task 9: Remove the hardcoded interpreter path — DONE (`f95a842`)
 
 **Objective:** The one catalog entry that is not hardware-agnostic.
 
-**Files:**
-- Modify: `legs.toml:264-266`
-- Modify: `scripts/lib/legs.py:58,76,107,180-187`
-- Modify: `scripts/run_battery.py:142`
-- Test: `tests/test_legs.py`, `tests/test_run_battery.py`
+**Shipped.** The leg names the variable that holds its interpreter and the capability that interpreter must have. It names no path.
 
 ```toml
-# The prompt helpers come from the checkout, so this leg runs under an interpreter that
-# has their dependencies. Point BATTERY_LCB_INTERPRETER at one; otherwise the run's own
-# interpreter is used and the leg reports `not run` when an import fails.
-interpreter_env = "BATTERY_LCB_INTERPRETER"
+interpreter_env = "LCB_PYTHON"
+interpreter_imports = ["datasets"]
 ```
 
-`Leg` gains `interpreter_env: str = ""`. `leg_command` resolves `interpreter` → env var → `sys.executable`. `validate_legs` keeps rejecting a relative `interpreter` and now also rejects setting both `interpreter` and `interpreter_env`.
+`resolve_interpreter(leg, standard)` resolves in order: `interpreter_env` in the environment → `interpreters.<NAME>` in `standard.toml` → a legacy absolute `interpreter` → `sys.executable`, stamping `source` and `borrowed`. `run_battery.leg_command` runs the leg under the resolved path. The plan emits an `interpreter:<leg>` dependency row whenever the resolved path is not the orchestrator's own, and says where the path came from.
 
-Tests: env var honored; empty env falls back to `sys.executable`; both set is a validation error; relative still rejected.
+`interpreter_dependency` imports `interpreter_imports` under the resolved interpreter and marks the leg `not run` when they are missing, so a path that cannot carry the leg fails at plan time instead of deep into a run.
 
-**Commit** `fix: resolve the lcb interpreter from the environment`
+Two things the plan below got wrong, both corrected in the implementation:
+
+1. The variable is `LCB_PYTHON`, and the machine-local default lives in `standard.toml`'s `[interpreters]` table. A standard that names the path keeps the catalog independent of any one machine and still lets a host override it from the environment.
+2. The capability check first asked for `lcb_runner`, which no interpreter can supply: the adapter puts the checkout on `sys.path` at run time, so the name only resolves inside the leg. It asks for `datasets` instead, which is the dependency the battery's own venv lacks. The path that used to sit in the catalog pointed at a python that cannot import `datasets` either, so the old configuration would have failed this leg at minute zero.
+
+**Commit** `fix(legs): name the LCB interpreter in the environment, and check what it can import`
 
 ---
 
@@ -344,20 +361,92 @@ Both must be green before the final commit. Push.
 
 ---
 
+## Task 11: A run survives the shell that started it
+
+**Objective:** Start a run and walk away. Close the terminal, drop the session, and the run keeps going.
+
+**Files:**
+- Add: `scripts/lib/detach.py`
+- Modify: `scripts/run_battery.py` (`--detach`, `--status`)
+- Test: `tests/test_detach.py`
+
+Every long run in the methodology vault was started under `setsid` because a run launched from a normal shell dies with it. That is currently the operator's job, done by hand, remembered or not.
+
+- `--detach` re-executes the orchestrator under `setsid`, in a new session, with stdout and stderr appended to `results/<run>/run.log`, and writes `results/<run>/run.pid`.
+- The parent prints the run directory, the pid, the log tail command, and the exact `--resume` line, then exits 0. It does not wait and it does not poll.
+- `--status` reads `run.json` and reports each leg's state. A pid file whose process is gone is reported as finished, never as running.
+
+Tests: the detached child is in its own session; the log file exists before the parent returns; a stale pid file reports finished.
+
+**Commit** `feat: runs detach from the shell that started them`
+
+---
+
+## Task 12: Every leg writes as it goes
+
+**Objective:** A killed run loses at most the case in flight, not the leg.
+
+**Files:**
+- Modify: `scripts/bench_math500.py`, `scripts/bench_gpqa_diamond.py`, `scripts/bench_humaneval_plus.py`, `scripts/bench_selftest.py`
+- Modify: `scripts/bench_instr_v2.py`, `scripts/bench_mmlu.py` (partial today)
+- Test: the matching test modules
+
+`bench_writing_generate.py` is the model: it checks for the per-case file on disk and skips what is already there. The four harnesses above hold every case in memory and write once at the end, so an interrupt discards hours.
+
+Each writes each case as it lands and reads existing cases back before generating, so `--resume` continues instead of restarts. The manifest's `done_marker` stays the completion signal: a leg with some cases on disk is resumable, not done.
+
+Tests: a two-case run interrupted after the first leaves one case on disk; the resumed run generates only the missing one.
+
+**Commit** `feat: harnesses checkpoint every case`
+
+---
+
+## Task 13: The run ends with a report
+
+**Objective:** Point it at a results directory and get the answer.
+
+**Files:**
+- Add: `scripts/report.py`, `scripts/lib/report.py`
+- Test: `tests/test_report.py`
+
+The v1 reporting toolchain was deleted in `3ffe4ce` and never replaced. Nothing today turns a results directory into a document.
+
+`python3 scripts/report.py results/<run>` writes `results/<run>/report.md` and prints it:
+
+- what was tested: model, shape and where it was read from, engine, engine build, checkpoint
+- how it was set up: every decision row, chosen against alternative, and the source of each number
+- the legs: score, cases scored, cases skipped, and the failure reason for any leg that did not run
+- what this run cannot be compared to, and why: harness bump, cap change, engine change, item hash
+- throughput and wall time per leg
+
+It reads `run.json` and the leg result files and writes nothing else, so it can be re-run at any time. `report.json` carries the same numbers for anything that wants to parse them.
+
+Tests: a run with one scored leg and one skipped leg produces a report naming both; a leg whose cap or harness differs from the comparison baseline is called out as not comparable.
+
+**Commit** `feat: a report for the run that just finished`
+
+---
+
 ## Order and independence
 
 ```
-Task 1 → 2 → 3 → 4        (model_probe, one file, sequential)
+Task 1 → 2 → 3 → 4        done
+Task 9                    done
+Task 7                    done
 Task 5 → 6                (engine_facts, independent of 1-4)
-Task 9                    (independent of all of the above)
-Task 7, 8                 (need 4 and 5 both)
-Task 10                   (last)
+Task 8                    (needs 5)
+Task 11, 12               (independent of everything above)
+Task 13                   (after 11-12, so the report describes the final shape)
+Task 10                   (last, with everything it has to document)
 ```
 
 ## Definition of done
 
 1. `python3 scripts/plan_run.py --endpoint URL` with no `--profile` produces a full sheet with the model's numbers read from the file, on any of the five engines.
-2. A vLLM run stamps `engine=vllm` and the window from `max_model_len`.
+2. A vLLM run stamps `engine=vllm` and its window from `max_model_len`.
 3. KV and flash-attn rows say what the engine said, or that the engine has no such knob.
 4. `grep -rn "/mnt/data" legs.toml standard.toml` returns nothing outside documented env-var examples.
-5. Full suite green, gauntlet exit 0, pushed.
+5. `run_battery.py --detach` returns and the run continues; `--status` reports it.
+6. A leg interrupted mid-run resumes without regenerating what is already on disk.
+7. `scripts/report.py results/<run>` produces the run's document, and says what the run cannot be compared to.
+8. Full suite green, gauntlet exit 0, pushed.
