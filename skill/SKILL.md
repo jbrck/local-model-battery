@@ -30,7 +30,33 @@ sheet, and taking that decision stamps the run off-standard instead of quietly c
 | items file | the leg's `data` path, hashed into the manifest | 4096-capped MMLU and 16384-capped MMLU are the same items and different scores |
 | a leg's interpreter | the leg's `interpreter` in `legs.toml` | a leg whose helpers come from an outside checkout cannot import under the orchestrator's own interpreter. The declared path must be absolute. Wrong path means the leg reports `not run` before its first item |
 | judge model | `standard.toml [judge] model`, unless `--judge-model` overrides it | the judge is a comparability key: two runs only compare when the same model scored both. The judge endpoint stays the operator's, and an empty one means the endpoint the run itself uses |
-| judge reasoning | `JUDGE_EXTRA_BODY` in `scripts/lib/judge.py` | a thinking judge burns its whole 1200-token budget in the reasoning channel and returns no JSON at all, so nothing parses. `reasoning_effort: none` is what makes the score reachable |
+| judge reasoning | `JUDGE_EXTRA_BODY` in `scripts/lib/judge.py`, and the endpoint's own policy | a thinking judge burns its whole 1200-token budget in the reasoning channel and returns no JSON at all, so nothing parses. `reasoning_effort: none` is what makes the score reachable, and an endpoint that refuses the flag gets asked once more without it. Which path scored the answer is recorded as `judge_path` |
+
+## Step 0: the brief
+
+```bash
+python3 scripts/consult.py                                    # nothing serving yet
+python3 scripts/consult.py --engine vllm                      # name the engine you intend to serve with
+python3 scripts/consult.py --endpoint http://127.0.0.1:11434/v1 --model-file <path.gguf>
+```
+
+Eight sections: the host with the source of each fact, the model's shape and the `model-types.toml`
+rows it matches, the engine, the fit call, the use cases and the variables, the judge candidates, the
+smoke check, and the exact `run_battery.py` line. It decides nothing. Read it, then put these
+questions to the operator.
+
+1. **Which engine serves it.** The brief names the one that answered, or, with nothing up, lists the
+   engines whose rows admit the model's weight format. `--engine ID` prints that row's serve and smoke
+   instructions, which is also the path on a Mac: get MLX up with its row's direction, smoke it, then
+   line the battery up against the endpoint like any other engine. Nothing in the brief reads the OS.
+2. **Which use case.** `ranking`, `throughput`, `capability` or `daily-driver`. Each picks the legs,
+   the cap, thinking and the repeats, and each carries what it must not be used to claim.
+3. **The window.** Only a decision when the host cannot serve the standard's 131072. What changing it
+   costs is in the table above.
+4. **Thinking on or off.** On where the leg needs it. Off is cheaper, and off-standard.
+5. **Which judge.** The brief lists the endpoint's models with everything under test removed. The
+   judge is the operator's choice, and it is worth qualifying with `calibrate_judge.py` before a
+   705-judgement run.
 
 ## Step 1: serve the model
 
@@ -44,11 +70,13 @@ curl -s http://localhost:11434/v1/models
 
 `--model` must match an id the endpoint lists, and the endpoint must serve `chat/completions`.
 
-## Step 2: write the profile
+## Step 2: a profile is an override, not a step
 
-One file per model, `profiles/<model>.toml`. Fields and where each number comes from:
-`profiles/README.md`. `weights_gb` plus `[model]`'s `n_layers`, `n_kv_heads` and `head_dim` are
-what the plan needs for KV arithmetic. Read them off `GET /props` once the model is serving.
+`plan_run.py` reads the model's shape from the model: a GGUF file with `--model-file`, a HuggingFace
+directory with `--model-dir`, or the live endpoint. Write `profiles/<model>.toml` only for a model
+that neither reader can describe, and only for the numbers they could not supply. Fields and their
+sources: `profiles/README.md`. Never derive `head_dim` from `n_embd / n_head`: some architectures
+differ, and the derivation was wrong by 4x on the first model it was tried on.
 
 ## Step 3: plan, and read the sheet
 
@@ -241,7 +269,7 @@ The v1 scoring toolchain is deleted (`report_scores.py`, `validate_suite.py`, `s
 The writing leg is the only leg that needs another model to produce a number. Three things break it, and all three read like a model that cannot write.
 
 - **The judge key.** The judge usually sits behind the same gateway as the run endpoint, so `--judge-api-key` falls back to `WRITING_JUDGE_API_KEY`, then to the run's own `--api-key`. It used to default to `not-needed`, which made every judgement a 401 while generation still passed.
-- **The judge's reasoning.** A thinking judge spends the whole `JUDGE_MAX_TOKENS` budget (1200) in `reasoning_content` and returns an empty `content`, so no judgement ever parses. Measured on `nous-glm-5-3-flash`: 1200 reasoning tokens, `finish_reason=length`, empty content, zero scores, four calls out of four; with `reasoning_effort: "none"` the same call returns 279 tokens of JSON in 1.9 s. `judge.score_answer` sends that body on every call and never reads the reasoning channel, because a monologue is not a score. `nous-gpt-oss-120b` fails the same way, and `thinking: {"type": "disabled"}` is ignored. Qualify a new judge with one call before a 705-judgement run.
+- **The judge's reasoning.** A thinking judge spends the whole `JUDGE_MAX_TOKENS` budget (1200) in `reasoning_content` and returns an empty `content`, so no judgement ever parses. Measured on `nous-glm-5-3-flash`: 1200 reasoning tokens, `finish_reason=length`, empty content, zero scores, four calls out of four; with `reasoning_effort: "none"` the same call returns 279 tokens of JSON in 1.9 s. `judge.score_answer` sends that body, and an endpoint that refuses to turn reasoning off is asked once more without it: that alias refused 6 calls out of 6 with a 400 saying reasoning is mandatory, while the identical call carrying no `reasoning_effort` returned 200. Which path scored the answer is recorded as `judge_path` (`reasoning_off`, `reasoning_on`, `no_call`), and the reasoning channel is read only on the `reasoning_on` path, where the judgement exists nowhere else. `nous-gpt-oss-120b` fails the same way, and `thinking: {"type": "disabled"}` is ignored. Qualify a new judge with `scripts/calibrate_judge.py --endpoint URL --api-key KEY [--judge-model NAME]` before a 705-judgement run: it sends four answers of known quality through the real judge path and prints each score, the spread, and a `discriminates` verdict. Against the pinned default it returned spread 7.0.
 - **A judge that parses nothing.** `judge_scored: 0` beside `mean_score: 0.0` reads in the manifest like a bad writer. The leg now reports `not scored`, names the judge and the failure count, and quotes the first `judge_error`. Zero parsed judgements is no score, not a low one.
 
 Judge quality on this stack, on the XP-001 task with a deliberately bad and a deliberately good answer, two calls each: bad 2.83 twice (Hook 1, below the 2 anchor), good 8.67 and 8.00. It separates the two hard, repeats exactly on the bad answer, and moves ±0.7 on the good one at temperature 0, so treat about 0.7 of the mean as the writing column's noise floor before reading a gap between two models.
