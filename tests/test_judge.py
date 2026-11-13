@@ -14,6 +14,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.lib.judge import (  # noqa: E402
+    JUDGE_PATH_NO_CALL,
+    JUDGE_PATH_REASONING_ON,
+    JUDGE_PATH_SUPPRESSED,
     _excerpt,
     build_judge_prompt,
     describe_contract,
@@ -241,6 +244,97 @@ class ExcerptTest(unittest.TestCase):
         raw = "line one\n\nline two\twith a tab   and spaces"
         self.assertEqual(_excerpt(raw), "line one line two with a tab and spaces")
         self.assertEqual(len(_excerpt("x" * 500)), 200)
+
+
+class JudgeReasoningPolicyTest(unittest.TestCase):
+    """What the judge does when an endpoint refuses to turn reasoning off.
+
+    Deployments differ on whether `reasoning_effort: none` is honoured, rejected, or
+    unknown, and that policy belongs to the endpoint. A scored answer therefore records
+    which way its judge ran: a judge that reasoned and one that did not are not the same
+    instrument, so a run has to say which one scored it.
+    """
+
+    def setUp(self):
+        self.judge = ModelConfig(name="stub-judge", token_limit=1200)
+
+    def refusal(self) -> dict:
+        """The 400 a deployment returns when reasoning is mandatory."""
+        return {"error": {"message": "Reasoning is mandatory for this endpoint and "
+                                     "cannot be disabled."}}
+
+    def good_reply(self) -> str:
+        return judge_reply(("form", 8, "three lines"), ("sense", 5, "coheres"))
+
+    def score_against(self, route) -> tuple[dict, JsonStub]:
+        with JsonStub(route) as stub:
+            self.judge.endpoint = stub.endpoint
+            result = score_answer(self.judge, TASK, "a haiku of three lines")
+        return result, stub
+
+    def chat_bodies(self, stub: JsonStub) -> list[dict]:
+        return [entry["body"] for entry in stub.seen
+                if str(entry["path"]).endswith("/chat/completions")]
+
+    def test_a_refused_reasoning_switch_is_retried_once_without_it(self):
+        calls: list[int] = []
+
+        def route(_body: dict) -> tuple[int, object]:
+            calls.append(1)
+            return (400, self.refusal()) if len(calls) == 1 else (200, completion(self.good_reply()))
+
+        result, stub = self.score_against(route)
+        self.assertEqual(result["mean"], 6.5)
+        self.assertEqual(result["judge_path"], JUDGE_PATH_REASONING_ON)
+        bodies = self.chat_bodies(stub)
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0]["reasoning_effort"], "none")
+        self.assertNotIn("reasoning_effort", bodies[1])
+
+    def test_a_failure_that_does_not_name_reasoning_is_not_retried(self):
+        routes: dict[str, tuple[int, object]] = {
+            "/v1/chat/completions": (400, {"error": {"message": "upstream request rejected"}})}
+
+        result, stub = self.score_against(routes)
+        self.assertEqual(len(self.chat_bodies(stub)), 1)
+        self.assertIsNone(result["mean"])
+        self.assertIn("400", result["judge_error"])
+        self.assertEqual(result["judge_path"], JUDGE_PATH_SUPPRESSED)
+
+    def test_the_retry_reads_a_reply_that_arrives_on_the_reasoning_channel(self):
+        reply = judge_reply(("form", 3, "not three lines"), ("sense", 2, "does not cohere"))
+        calls: list[int] = []
+
+        def route(_body: dict) -> tuple[int, object]:
+            calls.append(1)
+            if len(calls) == 1:
+                return (400, self.refusal())
+            return (200, completion("", reasoning=f"Working through the rubric. {reply}",
+                                    tokens=900))
+
+        result, _stub = self.score_against(route)
+        self.assertEqual(result["judge_path"], JUDGE_PATH_REASONING_ON)
+        self.assertEqual(result["mean"], 2.5)
+
+    def test_a_suppressed_call_that_comes_back_empty_is_not_read_from_reasoning(self):
+        routes: dict[str, tuple[int, object]] = {
+            "/v1/chat/completions": (200, completion(
+                "", reasoning=f"thinking {self.good_reply()}", tokens=1200,
+                finish_reason="length"))}
+
+        result, _stub = self.score_against(routes)
+        self.assertEqual(result["judge_path"], JUDGE_PATH_SUPPRESSED)
+        self.assertIsNone(result["mean"])
+        self.assertIn("reasoning channel", result["judge_error"])
+
+    def test_an_empty_answer_records_that_no_judge_call_was_made(self):
+        routes: dict[str, tuple[int, object]] = {
+            "/v1/chat/completions": (200, completion("should not be read"))}
+        with JsonStub(routes) as stub:
+            self.judge.endpoint = stub.endpoint
+            result = score_answer(self.judge, TASK, "   ")
+        self.assertEqual(result["judge_path"], JUDGE_PATH_NO_CALL)
+        self.assertEqual(self.chat_bodies(stub), [])
 
 
 if __name__ == "__main__":

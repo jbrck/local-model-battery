@@ -13,13 +13,26 @@ SCORE_MAX = 10
 JUDGE_MAX_TOKENS = 1200
 
 JUDGE_EXTRA_BODY = {"reasoning_effort": "none"}
-"""Keeps a thinking judge from spending the whole budget in the reasoning channel.
+"""Asks the judge not to spend its budget in the reasoning channel.
 
 Measured on nous-glm-5-3-flash: with reasoning on, every call came back with 1200
 reasoning tokens, finish_reason=length and an empty content field, so no judgement ever
-parsed. With reasoning_effort none the same call returns 279 tokens of JSON in under two
-seconds. Servers that do not know the parameter drop it.
+parsed. With reasoning_effort none the same call returned 279 tokens of JSON in under two
+seconds.
+
+That measurement stopped holding. Deployments now reject the parameter outright with a
+400 that names reasoning, and the same judge then answers with its reasoning channel
+full and the JSON still in content. Whether reasoning may be disabled is the endpoint's
+policy, not the battery's assumption, so `_ask_judge` retries once without the flag and
+records which path scored the answer.
 """
+
+# Which way the judge's scoring call was configured. Two runs scored by a judge that
+# reasoned and a judge that did not are not the same instrument, so the path is recorded.
+JUDGE_PATH_SUPPRESSED = "reasoning_off"
+JUDGE_PATH_REASONING_ON = "reasoning_on"
+JUDGE_PATH_NO_CALL = "no_call"
+REASONING_REFUSAL_MARKER = "reasoning"
 
 JUDGE_SYSTEM = """You score a single piece of writing against a fixed rubric.
 
@@ -126,6 +139,33 @@ def parse_scores(raw: str | None, expected_criteria: list[str]) -> list[dict] | 
     return cleaned
 
 
+def _refused_the_reasoning_switch(response: ChatResponse) -> bool:
+    """The endpoint will not let reasoning be turned off, so the extra body has to go.
+
+    A deployment that mandates reasoning answers the suppressed call with a 400 that
+    names it. Any other failure is a real failure and is not retried.
+    """
+    if response.ok:
+        return False
+    return REASONING_REFUSAL_MARKER in str(response.error or "").lower()
+
+
+def _ask_judge(judge: ModelConfig, messages: list[dict]) -> tuple[ChatResponse, str]:
+    """Ask the judge, dropping the reasoning switch when the endpoint refuses it.
+
+    One retry, never more. The answer is scored either way; which path scored it is
+    returned so the manifest can record it, because a judge that reasoned and a judge
+    that did not are not the same instrument.
+    """
+    response = post_chat(judge, messages, max_tokens=JUDGE_MAX_TOKENS,
+                         temperature=0.0, extra_body=JUDGE_EXTRA_BODY)
+    if not _refused_the_reasoning_switch(response):
+        return response, JUDGE_PATH_SUPPRESSED
+    retry = post_chat(judge, messages, max_tokens=JUDGE_MAX_TOKENS,
+                      temperature=0.0, extra_body=None)
+    return retry, JUDGE_PATH_REASONING_ON
+
+
 def score_answer(judge: ModelConfig, task: dict, answer: str) -> dict:
     """Score one answer. Empty answers take the floor without a judge call."""
     if not answer.strip():
@@ -134,29 +174,29 @@ def score_answer(judge: ModelConfig, task: dict, answer: str) -> dict:
                         "justification": "No answer content."} for c in task["rubric"]],
             "mean": float(SCORE_MIN),
             "empty": True,
+            "judge_path": JUDGE_PATH_NO_CALL,
             "judge_error": None,
         }
 
     criteria = [criterion["criterion"] for criterion in task["rubric"]]
-    response = post_chat(
-        judge,
-        [
-            {"role": "system", "content": JUDGE_SYSTEM},
-            {"role": "user", "content": build_judge_prompt(task, answer)},
-        ],
-        max_tokens=JUDGE_MAX_TOKENS,
-        temperature=0.0,
-        extra_body=JUDGE_EXTRA_BODY,
-    )
-    raw = response.answer(allow_reasoning_fallback=False)
+    messages = [
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "user", "content": build_judge_prompt(task, answer)},
+    ]
+    response, path = _ask_judge(judge, messages)
+    # A judge that had to reason may put the JSON in the reasoning channel, so the
+    # fallback reads there when content is empty. On the suppressed path it must not:
+    # an empty content field there means the budget was spent, not that the reply
+    # arrived somewhere else.
+    raw = response.answer(allow_reasoning_fallback=path == JUDGE_PATH_REASONING_ON)
     parsed = parse_scores(raw, criteria)
     if parsed is None:
-        return {"scores": [], "mean": None, "empty": False,
+        return {"scores": [], "mean": None, "empty": False, "judge_path": path,
                 "judge_error": _why_no_score(response, raw)}
 
     mean = sum(entry["score"] for entry in parsed) / len(parsed)
     return {"scores": parsed, "mean": round(mean, 3), "empty": False,
-            "judge_error": None}
+            "judge_path": path, "judge_error": None}
 
 
 def _excerpt(raw: str | None) -> str:
