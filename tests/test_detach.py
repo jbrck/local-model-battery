@@ -154,6 +154,32 @@ class SpawnDetached(TempRun):
         self.assertEqual(detach.run_state(self.out)["state"], "finished")
 
 
+class LaunchResume(TempRun):
+    """The parent's own mkdir must not read back as a previous run to the child."""
+
+    def test_directory_the_parent_creates_starts_resuming(self):
+        self.assertFalse(self.out.exists())
+        pid, _, child = detach.launch(
+            [sys.executable, "-c", SLEEPER, "--detach", "--out", str(self.out)], self.out)
+        self.addCleanup(self.kill_if_alive, pid)
+        self.assertNotIn("--detach", child)
+        self.assertIn("--resume", child,
+                      "a fresh run directory is not a previous run: the child resumes")
+        self.assertTrue(self.out.is_dir())
+        self.assertTrue(self.wait_gone(pid))
+
+    def test_directory_that_was_already_there_is_not_resumed_for_you(self):
+        self.out.mkdir(parents=True)
+        (self.out / "run-plan.json").write_text(json.dumps({"legs": [], "skips": []}))
+        pid, _, child = detach.launch(
+            [sys.executable, "-c", SLEEPER, "--detach", "--out", str(self.out)], self.out)
+        self.addCleanup(self.kill_if_alive, pid)
+        self.assertNotIn("--resume", child,
+                         "an existing run directory still has to be resumed on purpose")
+        self.assertNotIn("--detach", child)
+        self.assertTrue(self.wait_gone(pid))
+
+
 class LegStates(TempRun):
     """Leg state comes from run-plan.json for the ids and legs/ for the outcomes."""
 

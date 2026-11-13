@@ -122,8 +122,17 @@ def spawn_detached(argv: list[str], out_dir: Path) -> tuple[int, Path]:
 
 def launch(argv: list[str], out_dir: Path,
            script_path: str | None = None) -> tuple[int, Path, list[str]]:
-    """Detach this command: spawn the child and return its pid, log, and command line."""
+    """Detach this command: spawn the child and return its pid, log, and command line.
+
+    The run directory is made here, before the child runs its preflight, and the
+    preflight refuses a run directory that already exists unless the child is resuming.
+    A directory this call just made is not a previous run, so the child is started with
+    --resume: it plans from scratch either way, and a directory that was already there
+    still stops a fresh run the way it should.
+    """
     child = child_argv(argv, script_path)
+    if not out_dir.exists():
+        child = resume_argv(child)
     pid, log_path = spawn_detached(child, out_dir)
     return pid, log_path, child
 
