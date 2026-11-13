@@ -393,3 +393,40 @@ out of 577 methods: 15 CRAP and 9 coverage, concentrated in `plan_run.py` (10) a
 `bench_humaneval_plus.py` carrying one or two each. None were introduced by tasks 11-13; they were
 hidden, not absent. Complexity passes outright.
 
+## Tasks 14-16: the consult brief, the brief before an engine is up, the judge as the user's choice
+
+`scripts/consult.py` renders the brief: the host with its sources (section 1), the model shape
+with its source and the model types matched against `model-types.toml` (2), the engine (3), the
+fit call (4), the four use cases and five variables with consequences (5), the judge candidates
+(6), the smoke check (7) and the exact `run_battery.py` lineup with `--detach` and `--status`
+(8). Nothing is decided for the user: `--legs` and `--judge-model` are placeholders in the lineup
+until the user names them.
+
+- The three knowledge tables are read by id (`load_knowledge` / `rows_by_id` / `engine_row`), so a
+  corrected row changes the brief with no code change. A missing table or row raises
+  `MissingKnowledge` and the CLI exits 2 naming the ids that exist -- never a silent empty
+  section.
+- Task 15 is the same code path: with no endpoint, section 3 prints the chosen row's `serve` and
+  `smoke` (`--engine ID`), or lists the engines that could serve the file from what their rows say
+  about weight formats and asks the user to pick. The OS is never consulted. MLX needed no special
+  case. Section 7 becomes the setup checklist and section 8 is withheld with the reason.
+- Section 5 quotes a variable's `what_it_changes` and `decision_rule`, deliberately not its
+  `effect` rows: the effects carry measured numbers tied to specific hosts, and the brief names no
+  host, data or person.
+- Engine facts come from `scripts/lib/engine_facts.py` if it is in the tree, imported inside a
+  `try/except ImportError` so the brief still renders while that module is being built; the stub
+  tests inject a duck-typed stand-in, never the real probe.
+- Judge candidates are the endpoint's `/v1/models` list minus everything under test, fetched with
+  the same `get_json` path the battery uses (stubbed in tests with `JsonStub`). The pinned default
+  is named out loud even when the endpoint does not serve it.
+- `scripts/calibrate_judge.py` scores four answers of known quality (good / bad / truncated /
+  empty) through the real `judge.score_answer` path, one pass, serial, and prints per-answer
+  scores, the spread, and `discriminates` or `does not discriminate`. Verdict rules: spread at
+  least 3.0 AND good outscores bad; a judge error or an inverted ordering fails loudly with exit
+  1. The JSON record is the `judge_calibration` stamp. Tests inject the scoring function, so no
+  test touches the network; one subprocess test proves an unreachable judge is reported, not
+  passed.
+- Regex trap worth remembering: `iq?\d` requires a literal leading "i" (`?` binds to `q`). The
+  quant-tag pattern must be `i?q\d(?:_[a-z0-9]+)*` to match both `Q4_K_M` and `IQ3_XXS`.
+
+
