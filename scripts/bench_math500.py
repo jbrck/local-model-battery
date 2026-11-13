@@ -13,7 +13,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sympy import SympifyError, simplify  # noqa: E402
-
 from scripts.lib.harness import (  # noqa: E402
     LegArgs,
     Tally,
@@ -27,6 +26,10 @@ from scripts.lib.harness import (  # noqa: E402
     replay_response,
     write_case,
 )
+
+# What sympy can raise on text that is not an expression: its own wrapped error, the
+# ValueError it re-raises from parse_expr, and the TypeError a bad call produces.
+GRADER_ERRORS = (SympifyError, ValueError, TypeError, AttributeError, SyntaxError)
 
 SYSTEM_PROMPT = ("Answer directly and concisely. No preamble. No meta-commentary. "
                  "No sign-off. Stay on topic; stop when the answer is complete.")
@@ -89,7 +92,11 @@ def _grade_answer(gold: str, pred: str) -> bool:
         return True
     try:
         return bool(simplify(gold) == simplify(pred))
-    except SympifyError:
+    except GRADER_ERRORS:
+        # sympy raises more than SympifyError on text it cannot read as an expression.
+        # A gold like "(a+5)(b+2)" parses as a call on an Add and raises ValueError, and
+        # that escaped the old handler and killed the whole leg at case 103 of 500.
+        # An answer the grader cannot parse is simply not equal; it never ends the leg.
         return gold.strip().lower() == pred.strip().lower()
 
 

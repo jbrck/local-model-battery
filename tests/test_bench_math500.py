@@ -74,6 +74,25 @@ class GradeTest(unittest.TestCase):
         self.assertFalse(_grade_answer("42", ""))
         self.assertFalse(_grade_answer("", r"The answer is $\boxed{\pi}$."))
 
+    def test_a_gold_with_juxtaposed_parentheses_does_not_end_the_leg(self):
+        """(a+5)(b+2) parses as a call on an Add, which sympy raises on from simplify as a
+        ValueError. The handler caught SympifyError only, so the exception escaped a leg
+        that had already answered 102 of 500 items."""
+        self.assertFalse(_grade_answer("(a+5)(b+2)", "ab+5b+2a+10"))
+        self.assertFalse(_grade_answer("42", "(a+5)(b+2)"))
+
+    def test_the_same_unreadable_gold_still_matches_on_identical_text(self):
+        self.assertTrue(_grade_answer("(a+5)(b+2)", "(a+5)(b+2)"))
+
+    def test_latex_and_implicit_multiplication_are_not_expanded(self):
+        """Known limitation, pinned so it cannot drift silently: sympify does not read
+        LaTeX, and 2x parses as one symbol named "2x". Both sides then fall through to the
+        string compare. Widening this changes what the leg scores, so it is a suite
+        version decision, not a grader fix."""
+        self.assertFalse(_grade_answer(r"\frac{1}{2}", "0.5"))
+        self.assertFalse(_grade_answer("2x+2", "2(x+1)"))
+
+
 
 class RunTest(unittest.TestCase):
     """End to end through JsonStub: the counters and the block they produce."""
