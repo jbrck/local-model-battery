@@ -242,6 +242,76 @@ def result_path(leg_id: str, args: LegArgs) -> str:
     return os.path.join(args.output_dir, f"{leg_id}{RESULT_SUFFIX}")
 
 
+# ---------- per-case checkpoints ----------
+#
+# A killed run must lose at most the case in flight, not the leg. Every leg writes one
+# checkpoint file per case the moment the case lands, and on start replays the files
+# already on disk into its Tally, so a resumed run's counters come out identical to an
+# uninterrupted one's. Legs share one --output-dir, so the files are namespaced by leg.
+
+CHECKPOINT_DIRNAME = "cases"
+
+
+def case_path(args: LegArgs, leg_id: str, case_id: str) -> str:
+    """Where one case's checkpoint lives: <output-dir>/cases/<leg>/<case>.json."""
+    return os.path.join(args.output_dir, CHECKPOINT_DIRNAME, leg_id, f"{case_id}.json")
+
+
+def write_case(args: LegArgs, leg_id: str, case_id: str, record: dict) -> None:
+    """Checkpoint one case as soon as it lands, staged then renamed so a kill cannot
+    leave a half-written file behind for the resume to trip over."""
+    path = case_path(args, leg_id, case_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    staging = f"{path}.partial"
+    with open(staging, "w") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+    os.replace(staging, path)
+
+
+def load_case(args: LegArgs, leg_id: str, case_id: str) -> dict | None:
+    """The checkpoint already on disk for one case, or None when it has not run."""
+    path = case_path(args, leg_id, case_id)
+    if not os.path.exists(path):
+        return None
+    with open(path) as handle:
+        record = json.load(handle)
+    return record if isinstance(record, dict) else None
+
+
+def replay_payload(response: ChatResponse) -> dict | None:
+    """The slice of a response the counters need, small enough to keep per case."""
+    if not response.ok:
+        return None
+    return {
+        "choices": [{"finish_reason": response.finish_reason,
+                     "message": response.message}],
+        "usage": {"completion_tokens": response.completion_tokens},
+    }
+
+
+def case_record(case_id: str, response: ChatResponse,
+                correct: bool | None = None, **extra) -> dict:
+    """The checkpoint for one case: everything a resumed run needs to count it again."""
+    record = {
+        "case": case_id,
+        "status": response.status,
+        "elapsed_s": response.elapsed_s,
+        "error": response.error,
+        "payload": replay_payload(response),
+        "correct": correct,
+    }
+    record.update(extra)
+    return record
+
+
+def replay_response(record: dict) -> ChatResponse:
+    """Rebuild the response a checkpoint saved, so a replayed Tally matches the original."""
+    return ChatResponse(status=record.get("status"), payload=record.get("payload"),
+                        elapsed_s=float(record.get("elapsed_s") or 0.0),
+                        error=record.get("error"))
+
+
 def finish(leg_id: str, args: LegArgs, tally: Tally, extra: dict | None = None) -> dict:
     """Write the result block and print it, so the orchestrator and a human both see it."""
     block = tally.to_result(leg_id, args, extra)

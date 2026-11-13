@@ -11,6 +11,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
+from scripts.lib.harness import LegArgs
+from scripts.lib.model import ChatResponse, ModelConfig
+
 Route = tuple[int, object]
 
 
@@ -100,3 +103,40 @@ class JsonStub:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+class FakeAsk:
+    """A deterministic stand-in for a leg's ask(): one fixed answer per prompt.
+
+    No server, no timing variance: every answer carries the same token count and
+    elapsed time, so a resumed run's counters compare equal to an uninterrupted one's.
+    """
+
+    def __init__(self, answers: dict[str, str], tokens: int = 50,
+                 elapsed_s: float = 2.0) -> None:
+        self.answers = answers
+        self.tokens = tokens
+        self.elapsed_s = elapsed_s
+        self.calls: list[str] = []
+
+    def __call__(self, cfg: ModelConfig, messages: list[dict], args: LegArgs,
+                 cap: int | None = None) -> ChatResponse:
+        prompt = messages[-1]["content"]
+        self.calls.append(prompt)
+        return ChatResponse(status=200, payload=completion(self.answers[prompt],
+                                                           tokens=self.tokens),
+                            elapsed_s=self.elapsed_s)
+
+
+class DieAfter:
+    """An ask() wrapper that raises on the Nth call, standing in for a killed run."""
+
+    def __init__(self, inner: FakeAsk, die_on: int) -> None:
+        self.inner = inner
+        self.die_on = die_on
+
+    def __call__(self, cfg: ModelConfig, messages: list[dict], args: LegArgs,
+                 cap: int | None = None) -> ChatResponse:
+        if len(self.inner.calls) >= self.die_on:
+            raise KeyboardInterrupt("run killed")
+        return self.inner(cfg, messages, args, cap=cap)

@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 import sys
 
-from scripts.lib.harness import (LegArgs, Tally, ask, finish, is_cap_hit,
-                                 leg_config, load_items, parse_leg_args)
+from scripts.lib.harness import (LegArgs, Tally, ask, case_record, finish, is_cap_hit,
+                                 leg_config, load_case, load_items, parse_leg_args,
+                                 replay_response, write_case)
 from scripts.lib.model import ChatResponse
 
 LEG_ID = "gpqa_diamond"
@@ -36,12 +37,21 @@ def grade(response: ChatResponse, gold: str) -> tuple[bool | None, str, str]:
 
 
 def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
-    """Ask every item and tally the letter matches."""
+    """Ask every item, checkpoint each case and tally the letter matches."""
     tally = Tally()
     rows: list[dict] = []
     cfg = leg_config(args)
     items = load_items(args.data, args.limit)
     for index, item in enumerate(items, start=1):
+        case_id = f"{index - 1:05d}"
+        saved = load_case(args, LEG_ID, case_id)
+        if saved is not None:
+            row = saved["row"]
+            rows.append(row)
+            tally.record(replay_response(saved), correct=saved.get("correct"))
+            print(f"  [{index}/{len(items)}] reused (gold={row['gold']}, "
+                  f"got={row['predicted'] or '?'})", flush=True)
+            continue
         gold = extract_letter(item["answer"])
         response = ask(cfg, [
             {"role": "system", "content": SYSTEM},
@@ -49,7 +59,7 @@ def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
         ], args)
         correct, predicted, channel = grade(response, gold)
         tally.record(response, correct=correct)
-        rows.append({
+        row = {
             "id": index - 1,
             "gold": gold,
             "predicted": predicted,
@@ -57,7 +67,10 @@ def run_leg(args: LegArgs) -> tuple[Tally, list[dict]]:
             "channel": channel,
             "cap_hit": response.ok and is_cap_hit(response),
             "completion_tokens": response.completion_tokens,
-        })
+        }
+        rows.append(row)
+        write_case(args, LEG_ID, case_id,
+                   case_record(case_id, response, correct=correct, row=row))
         mark = "?" if correct is None else ("PASS" if correct else "FAIL")
         print(f"  [{index}/{len(items)}] {mark} (gold={gold}, got={predicted or '?'})"
               f" ({response.elapsed_s:.1f}s)", flush=True)

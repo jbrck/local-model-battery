@@ -8,6 +8,8 @@ One command, one run directory. The directory ends up holding:
     MANIFEST.json    the standard, the profile, the host and the serve, all fingerprinted
     legs/*.result.json   one block per leg, with the counters the standard compares
     logs/*.log       the leg's own stdout, kept so a weird score can be read back
+    run.log          the orchestrator's own output when started with --detach
+    run.pid          the detached run's pid, read back by --status
     NOTES.md         the run's account of itself, ending in the comparability stamp
 
     python3 scripts/run_battery.py --model arete-27b \
@@ -31,6 +33,7 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from scripts.lib.config import load_toml  # noqa: E402
+from scripts.lib import detach  # noqa: E402
 from scripts.lib.harness import RESULT_SUFFIX  # noqa: E402
 from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
@@ -92,6 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not stop a leg that overruns its planned budget")
     parser.add_argument("--strict", action="store_true",
                         help="exit non-zero when a leg is missing or was never planned")
+    parser.add_argument("--detach", action="store_true",
+                        help="start the run in its own session and exit; "
+                             "output appends to run.log, the pid goes to run.pid")
+    parser.add_argument("--status", action="store_true",
+                        help="read a run directory: whether the pid is alive, "
+                             "and each leg's state")
     parser.add_argument("--json", action="store_true", help="print the summary as JSON")
     return parser
 
@@ -304,9 +313,49 @@ def resolve_judge(args: argparse.Namespace) -> None:
         args.judge_model, args.judge_endpoint, args.endpoint, load_toml(STANDARD_FILE))
 
 
+def detach_run(args: argparse.Namespace) -> int:
+    """Start the orchestrator again in its own session, then tell the operator where to look."""
+    if not args.out:
+        print("\n--out is required for --detach", file=sys.stderr)
+        return 2
+    out_dir = Path(args.out).expanduser()
+    pid, log_path, child = detach.launch(sys.argv, out_dir, os.path.abspath(sys.argv[0]))
+    print(f"run directory: {out_dir}")
+    print(f"pid: {pid}")
+    print(f"log: tail -f {log_path}")
+    print(f"resume: {' '.join(detach.resume_argv(child))}")
+    return 0
+
+
+def status_report(args: argparse.Namespace) -> int:
+    """What the run directory says, plainly: the pid's liveness and each leg's state."""
+    if not args.out:
+        print("\n--out is required for --status", file=sys.stderr)
+        return 2
+    out_dir = Path(args.out).expanduser()
+    state = detach.run_state(out_dir)
+    print(f"run directory: {out_dir}")
+    if state["pid"] is not None:
+        print(f"pid: {state['pid']}")
+    print(state["detail"])
+    legs = detach.leg_states(out_dir)
+    if not legs:
+        print(f"no {detach.PLAN_FILE} in {out_dir}: no planned legs to report")
+    for leg_id, block in legs.items():
+        line = f"  {leg_id:16s} {block['status']}"
+        if block["reason"]:
+            line += f"  ({block['reason']})"
+        print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     resolve_judge(args)
+    if args.status:
+        return status_report(args)
+    if args.detach:
+        return detach_run(args)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     timer = start_timer()
     plan, host, server, pilot = load_plan(args)

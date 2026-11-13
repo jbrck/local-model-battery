@@ -15,7 +15,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.lib import harness  # noqa: E402
-from scripts.lib.harness import LegArgs, Tally  # noqa: E402
+from scripts.lib.harness import (  # noqa: E402
+    LegArgs,
+    Tally,
+    case_record,
+    load_case,
+    replay_response,
+    write_case,
+)
 
 LEG_ID = "instr_v2"
 DEFAULT_DATA = "data/instr_v2_tasks.json"
@@ -149,18 +156,26 @@ def items_hash(items: list[dict]) -> str:
 
 
 def run_instr(cfg, items: list[dict], args: LegArgs) -> Tally:
-    """One ask per item, graded by the item's checker, counted in the tally."""
+    """One ask per item, graded by the item's checker, checkpointed and counted."""
     tally = Tally()
-    for item in items:
+    for index, item in enumerate(items):
+        case_id = f"{index:05d}"
+        saved = load_case(args, LEG_ID, case_id)
+        if saved is not None:
+            tally.record(replay_response(saved), correct=saved.get("correct"))
+            print(f"  {item['id']:20s} reused", flush=True)
+            continue
         messages = [{"role": "user", "content": item["prompt"]}]
         response = harness.ask(cfg, messages, args)
         if response.ok:
             passed = check(item["checker"], response.answer() or "")
-            tally.record(response, correct=passed)
             mark = "\u2713" if passed else "\u2717"
         else:
-            tally.record(response)
+            passed = None
             mark = "!"
+        tally.record(response, correct=passed)
+        write_case(args, LEG_ID, case_id,
+                   case_record(case_id, response, correct=passed, item=item["id"]))
         print(f"  {item['id']:20s} {mark}", flush=True)
     return tally
 

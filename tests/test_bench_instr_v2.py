@@ -3,11 +3,13 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from scripts.bench_instr_v2 import CHECKERS, check
 from scripts.bench_instr_v2 import main as bench_main
 from scripts.bench_instr_v2 import run_instr
 from scripts.lib.harness import LegArgs, leg_config
+from tests.stub_json import DieAfter, FakeAsk
 
 CASES = [
     ("exact:banana", "BANANA", "banana"),
@@ -97,8 +99,11 @@ class RunTest(unittest.TestCase):
         return path
 
     def run_once(self, **overrides) -> dict:
+        # A fresh output dir per run: the leg checkpoints its cases, and one test's
+        # leftovers must never be reused as another test's answers.
         args = LegArgs(model="m", endpoint=self.stub.endpoint,
-                       data=self.write_items(), **overrides)
+                       data=self.write_items(), output_dir=tempfile.mkdtemp(),
+                       **overrides)
         cfg = leg_config(args)
         with open(args.data) as handle:
             items = json.load(handle)
@@ -140,6 +145,60 @@ class RunTest(unittest.TestCase):
         sent = self.stub.seen[-1]["body"]
         self.assertEqual(sent["max_tokens"], 512)
         self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})
+
+
+class CheckpointTest(unittest.TestCase):
+    """A killed run keeps its finished cases; the resume generates only the rest."""
+
+    ITEMS = ITEMS[:2]  # one passes (blue), one fails (a cat)
+
+    def setUp(self) -> None:
+        from tests.stub_json import DieAfter, FakeAsk
+
+        self.fake = FakeAsk(REPLIES)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.out_dir = os.path.join(self.tmpdir.name, "results")
+
+    def args(self) -> LegArgs:
+        return LegArgs(model="m", data=self.write_items(),
+                       output_dir=self.out_dir)
+
+    @staticmethod
+    def write_items() -> str:
+        path = os.path.join(tempfile.mkdtemp(), "items.json")
+        with open(path, "w") as handle:
+            json.dump(CheckpointTest.ITEMS, handle)
+        return path
+
+    def cases_dir(self) -> str:
+        return os.path.join(self.out_dir, "cases", "instr_v2")
+
+    def run_leg_with(self, ask: FakeAsk | DieAfter) -> tuple:
+        args = self.args()
+        with unittest.mock.patch("scripts.lib.harness.ask", ask):
+            tally = run_instr(leg_config(args), self.ITEMS, args)
+        return tally, tally.to_result("instr_v2", args)
+
+    def test_a_kill_after_the_first_case_leaves_exactly_one_on_disk(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.assertEqual(sorted(os.listdir(self.cases_dir())), ["00000.json"])
+
+    def test_a_resume_generates_only_the_missing_case_and_matches_the_full_run(self) -> None:
+        _, full_block = self.run_leg_with(self.fake)
+        self.assertEqual(len(self.fake.calls), 2)
+
+        # Fresh directory: one case lands, the run dies, the resume finishes the leg.
+        self.setUp()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.fake.calls.clear()
+        _, resumed_block = self.run_leg_with(self.fake)
+        self.assertEqual(self.fake.calls, [self.ITEMS[1]["prompt"]])
+        self.assertEqual(sorted(os.listdir(self.cases_dir())),
+                         ["00000.json", "00001.json"])
+        self.assertEqual(resumed_block, full_block)
 
 
 if __name__ == "__main__":

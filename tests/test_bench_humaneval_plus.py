@@ -3,11 +3,13 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from scripts.bench_humaneval_plus import candidate_source, strip_fences
 from scripts.bench_humaneval_plus import main as bench_main
 from scripts.bench_humaneval_plus import run_humaneval
 from scripts.lib.harness import LegArgs, Tally
+from tests.stub_json import DieAfter, FakeAsk
 
 PROMPT = "def add_two(a, b):\n    \"\"\"Return the sum.\"\"\"\n"
 TEST = "def check(candidate):\n    assert candidate(1, 2) == 3\n"
@@ -73,7 +75,10 @@ class RunTest(unittest.TestCase):
 
     def run_once(self, **overrides) -> tuple[Tally, dict]:
         data = overrides.pop("data", self.item_path())
-        args = LegArgs(model="m", endpoint=self.stub.endpoint, data=data, **overrides)
+        # A fresh output dir per run: the leg checkpoints its cases, and one test's
+        # leftovers must never be reused as another test's answers.
+        args = LegArgs(model="m", endpoint=self.stub.endpoint, data=data,
+                       output_dir=tempfile.mkdtemp(), **overrides)
         tally = run_humaneval(args)
         return tally, tally.to_result("humaneval_plus", args)
 
@@ -122,6 +127,63 @@ class RunTest(unittest.TestCase):
         self.assertEqual(sent["messages"][1]["content"], PROMPT)
 
 
+class CheckpointTest(unittest.TestCase):
+    """A killed run keeps its finished cases; the resume generates only the rest."""
+
+    TEST = "def check(candidate):\n    assert candidate(1, 2) == 3\n"
+    PROMPTS = (
+        'def add_two(a, b):\n    """Variant one."""\n',
+        'def add_two(a, b):\n    """Variant two."""\n',
+    )
+    ANSWERS = {PROMPTS[0]: "```python\n    return a + b\n```",
+               PROMPTS[1]: "```python\n    return a - b\n```"}
+
+    def setUp(self) -> None:
+        self.fake = FakeAsk(self.ANSWERS)
+        self.tmpdir = tempfile.mkdtemp()
+        self.data = os.path.join(self.tmpdir, "items.json")
+        with open(self.data, "w") as handle:
+            json.dump([{"task_id": f"case/{index}", "prompt": prompt,
+                        "entry_point": "add_two", "test": self.TEST, "imports": ""}
+                       for index, prompt in enumerate(self.PROMPTS)], handle)
+        self.out_dir = os.path.join(self.tmpdir, "results")
+
+    def args(self) -> LegArgs:
+        return LegArgs(model="m", data=self.data, output_dir=self.out_dir)
+
+    def cases_dir(self) -> str:
+        return os.path.join(self.out_dir, "cases", "humaneval_plus")
+
+    def run_leg_with(self, ask: FakeAsk | DieAfter) -> Tally:
+        with unittest.mock.patch("scripts.bench_humaneval_plus.ask", ask):
+            return run_humaneval(self.args())
+
+    def test_a_kill_after_the_first_case_leaves_exactly_one_on_disk(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.assertEqual(sorted(os.listdir(self.cases_dir())), ["00000.json"])
+
+    def test_a_resume_generates_only_the_missing_case_and_matches_the_full_run(self) -> None:
+        args = self.args()
+        full_block = self.run_leg_with(self.fake).to_result("humaneval_plus", args)
+        self.assertEqual(len(self.fake.calls), 2)
+
+        # Fresh directory: one case lands, the run dies, the resume finishes the leg.
+        self.setUp()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.fake.calls.clear()
+        args = self.args()
+        resumed_block = self.run_leg_with(self.fake).to_result("humaneval_plus", args)
+        self.assertEqual(self.fake.calls, [self.PROMPTS[1]])
+        self.assertEqual(sorted(os.listdir(self.cases_dir())),
+                         ["00000.json", "00001.json"])
+        for key in ("items", "scored", "correct", "score_pct", "tps", "cap_hits",
+                    "runaway", "timeout_hits", "failed", "tokens", "elapsed_s",
+                    "status"):
+            self.assertEqual(resumed_block[key], full_block[key], key)
+
+
 class TransportFailureTest(unittest.TestCase):
     """A leg keeps counting when the endpoint answers garbage."""
 
@@ -135,7 +197,7 @@ class TransportFailureTest(unittest.TestCase):
     def test_a_failed_request_is_counted_not_scored(self) -> None:
         path = RunTest.item_path()
         args = LegArgs(model="m", endpoint=self.stub.endpoint, data=path,
-                       limit=1)
+                       output_dir=tempfile.mkdtemp(), limit=1)
         tally = run_humaneval(args)
         block = tally.to_result("humaneval_plus", args)
         self.assertEqual(block["items"], 1)

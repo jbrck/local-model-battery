@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -23,6 +24,7 @@ from scripts.bench_mmlu import (  # noqa: E402
     run_mmlu,
 )
 from scripts.lib.harness import LegArgs, leg_config  # noqa: E402
+from tests.stub_json import DieAfter, FakeAsk  # noqa: E402
 from tests.stub_json import JsonStub, completion  # noqa: E402
 
 DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -114,7 +116,10 @@ class CapHitScoringTest(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_truncated_item_counts_as_cap_hit_and_wrong(self):
-        args = replace(args_for(self.stub), data=self.items_path)
+        # A fresh output dir per run: the leg checkpoints its cases, and one test's
+        # leftovers must never be reused as another test's answers.
+        args = replace(args_for(self.stub), data=self.items_path,
+                       output_dir=tempfile.mkdtemp())
         with open(args.data) as handle:
             items = json.load(handle)["items"]
         tally = run_mmlu(leg_config(args), items, args)
@@ -124,6 +129,63 @@ class CapHitScoringTest(unittest.TestCase):
         self.assertEqual(tally.correct, 1)     # only the clean answer scored
         self.assertEqual(tally.cap_hits, 1)     # the truncated item hit the cap
         self.assertEqual(tally.status(), "pass")
+
+
+class CheckpointTest(unittest.TestCase):
+    """A killed run keeps its finished cases; the resume generates only the rest."""
+
+    ITEMS = [
+        {"id": 0, "subject": "astronomy", "question": "Which planet is closest to the sun?",
+         "choices": ["Venus", "Mercury", "Earth", "Mars"], "answer": "B"},
+        {"id": 1, "subject": "astronomy", "question": "Which planet has the most moons?",
+         "choices": ["Mars", "Venus", "Jupiter", "Saturn"], "answer": "C"},
+    ]
+
+    def setUp(self) -> None:
+        # The leg sends the rendered prompt, so the fake keys its answers on that.
+        self.fake = FakeAsk({build_prompt(item): f"Answer: {item['answer']}"
+                             for item in self.ITEMS})
+        self.second_prompt = build_prompt(self.ITEMS[1])
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.data = os.path.join(self.tmpdir.name, "items.json")
+        with open(self.data, "w") as handle:
+            json.dump({"items": self.ITEMS}, handle)
+        self.out_dir = os.path.join(self.tmpdir.name, "results")
+
+    def args(self) -> LegArgs:
+        return replace(LegArgs(model="stub-model"), data=self.data,
+                       output_dir=self.out_dir, cap=4096, timeout_s=30)
+
+    def cases_dir(self) -> str:
+        return os.path.join(self.out_dir, "cases", "mmlu")
+
+    def run_leg_with(self, ask: FakeAsk | DieAfter) -> tuple:
+        args = self.args()
+        with unittest.mock.patch("scripts.lib.harness.ask", ask):
+            tally = run_mmlu(leg_config(args), self.ITEMS, args)
+        return tally, tally.to_result("mmlu", args)
+
+    def test_a_kill_after_the_first_case_leaves_exactly_one_on_disk(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.assertEqual(sorted(os.listdir(self.cases_dir())), ["00000.json"])
+
+    def test_a_resume_generates_only_the_missing_case_and_matches_the_full_run(self) -> None:
+        full_tally, full_block = self.run_leg_with(self.fake)
+        self.assertEqual(len(self.fake.calls), 2)
+
+        # Fresh directory: one case lands, the run dies, the resume finishes the leg.
+        self.setUp()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.fake.calls.clear()
+        resumed_tally, resumed_block = self.run_leg_with(self.fake)
+        self.assertEqual(self.fake.calls, [self.second_prompt])
+        self.assertEqual(sorted(os.listdir(self.cases_dir())),
+                         ["00000.json", "00001.json"])
+        self.assertEqual(resumed_block, full_block)
+        self.assertEqual(resumed_tally.items, full_tally.items)
 
 
 class MainTest(unittest.TestCase):

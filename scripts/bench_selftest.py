@@ -20,9 +20,13 @@ from scripts.lib.harness import (  # noqa: E402
     LegArgs,
     Tally,
     ask,
+    case_record,
     finish,
     leg_config,
+    load_case,
     parse_leg_args,
+    replay_response,
+    write_case,
 )
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.model import ChatResponse, ModelConfig, get_json  # noqa: E402
@@ -119,21 +123,49 @@ def _leg_import_check(entries: list[tuple[str, str]] | None = None) -> tuple[boo
     return True, f"all {len(checked)} in-repo leg scripts import"
 
 
+def _record_check(args: LegArgs, tally: Tally, name: str,
+                  outcome: tuple[bool, str, ChatResponse | None]) -> str:
+    """Count one check, checkpoint it as soon as it lands, and return its label."""
+    ok, note, response = outcome
+    label = _label(ok, note)
+    if response is None:
+        record = {"case": name, "label": label, "correct": ok, "tallied": False}
+    else:
+        tally.record(response, correct=ok)
+        record = case_record(name, response, correct=ok, label=label, tallied=True)
+    write_case(args, SELFTEST_LEG_ID, name, record)
+    return label
+
+
+def _replay_check(args: LegArgs, tally: Tally, name: str) -> str:
+    """Re-count one checkpointed check without re-running it."""
+    saved = load_case(args, SELFTEST_LEG_ID, name)
+    if saved is None:
+        return ""
+    if saved.get("tallied"):
+        tally.record(replay_response(saved), correct=saved.get("correct"))
+    return str(saved["label"])
+
+
 def main(argv: list[str] | None = None,
          import_entries: list[tuple[str, str]] | None = None) -> int:
     args = parse_leg_args("endpoint and harness selftest", argv=argv)
     cfg = leg_config(args)
     tally = Tally()
     checks: dict[str, str] = {}
-    ok_models, note_models, models_response = _models_check(cfg)
-    checks["endpoint_models"] = _label(ok_models, note_models)
-    tally.record(models_response, correct=ok_models)
-    ok_chat, note_chat, chat_response = _chat_check(cfg, args)
-    checks["one_token_chat"] = _label(ok_chat, note_chat)
-    tally.record(chat_response, correct=ok_chat)
-    checks["thinking_switch"] = _label(*_thinking_check(cfg))
-    ok_imports, note_imports = _leg_import_check(import_entries)
-    checks["leg_imports"] = _label(ok_imports, note_imports)
+    steps = (
+        ("endpoint_models", lambda: _models_check(cfg)),
+        ("one_token_chat", lambda: _chat_check(cfg, args)),
+        ("thinking_switch", lambda: (*_thinking_check(cfg), None)),
+        ("leg_imports", lambda: (*_leg_import_check(import_entries), None)),
+    )
+    for name, check in steps:
+        saved = load_case(args, SELFTEST_LEG_ID, name)
+        if saved is None:
+            checks[name] = _record_check(args, tally, name, check())
+        else:
+            checks[name] = _replay_check(args, tally, name)
+            print(f"  {name} reused", flush=True)
     gate_ok = all(checks[name].startswith("pass") for name in CHECK_NAMES)
     extra: dict = {"checks": checks}
     if not gate_ok:

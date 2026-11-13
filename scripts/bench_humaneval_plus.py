@@ -17,10 +17,14 @@ from scripts.lib.harness import (  # noqa: E402
     LegArgs,
     Tally,
     ask,
+    case_record,
     finish,
     leg_config,
+    load_case,
     load_items,
     parse_leg_args,
+    replay_response,
+    write_case,
 )
 from scripts.lib.model import ChatResponse  # noqa: E402
 
@@ -29,6 +33,7 @@ Output ONLY the code, no explanation, no markdown formatting, no imports.
 The solution must be a standalone Python function."""
 
 CODE_FENCE = "```"
+LEG_ID = "humaneval_plus"
 
 
 def _trim_head(lines: list[str]) -> None:
@@ -86,33 +91,58 @@ def _grade_item(response: ChatResponse, item: dict) -> tuple[bool | None, str]:
     return grade_completion(source, item["entry_point"], item["test"])
 
 
-def _tally_item(tally: Tally, response: ChatResponse, item: dict, total: int) -> None:
-    """Record one case in the tally and print its line."""
+def _tally_item(tally: Tally, response: ChatResponse, item: dict,
+                total: int) -> tuple[bool | None, dict]:
+    """Record one case in the tally and print its line.
+
+    Returns the correctness it was counted with and the extras its checkpoint needs.
+    """
     if not response.ok:
         tally.record(response)
         print(f"  [{tally.items}/{total}] ! ({response.elapsed_s:.1f}s)"
               f" {response.error or ''}", flush=True)
-        return
+        return None, {}
     correct, detail = _grade_item(response, item)
+    extras: dict = {}
     if correct is None:
-        tally.record(response, correct=False)
+        # The candidate never scored: counted as wrong, named in the notes.
+        extras = {"exec_timeout": True, "note": f"{item['task_id']}: execution {detail}"}
+        correct = False
+        tally.record(response, correct=correct)
         tally.timeout_hits += 1
-        tally.notes.append(f"{item['task_id']}: execution {detail}")
+        tally.notes.append(extras["note"])
     else:
         tally.record(response, correct=correct)
     mark = "PASS" if correct else "FAIL"
     print(f"  [{tally.items}/{total}] {mark} ({response.elapsed_s:.1f}s)"
           + ("" if correct else f" {detail}"), flush=True)
+    return correct, extras
+
+
+def _replay_item(tally: Tally, saved: dict, total: int, case_id: str) -> None:
+    """Count one checkpointed case again, without re-asking or re-executing it."""
+    tally.record(replay_response(saved), correct=saved.get("correct"))
+    if saved.get("exec_timeout"):
+        tally.timeout_hits += 1
+        tally.notes.append(saved.get("note") or "")
+    print(f"  [{tally.items}/{total}] reused ({case_id})", flush=True)
 
 
 def run_humaneval(args: LegArgs) -> Tally:
-    """One ask per item; execute what comes back and tally it."""
+    """One ask per item; execute what comes back, checkpoint it and tally it."""
     cfg = leg_config(args)
     items = load_items(args.data, args.limit)
     tally = Tally()
-    for item in items:
+    for index, item in enumerate(items):
+        case_id = f"{index:05d}"
+        saved = load_case(args, LEG_ID, case_id)
+        if saved is not None:
+            _replay_item(tally, saved, len(items), item.get("task_id") or case_id)
+            continue
         response = ask(cfg, messages_for(item), args)
-        _tally_item(tally, response, item, len(items))
+        correct, extras = _tally_item(tally, response, item, len(items))
+        write_case(args, LEG_ID, case_id,
+                   case_record(case_id, response, correct=correct, **extras))
     return tally
 
 
@@ -121,7 +151,7 @@ def main(argv: list[str] | None = None) -> None:
                           default_data="data/humaneval_plus.json", argv=argv)
     print(f"HumanEval+ [{args.model}] cap {args.cap} thinking {args.thinking}",
           flush=True)
-    finish("humaneval_plus", args, run_humaneval(args))
+    finish(LEG_ID, args, run_humaneval(args))
 
 
 if __name__ == "__main__":

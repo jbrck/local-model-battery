@@ -1,11 +1,13 @@
 """The selftest gate: four checks, one result block, a non-zero exit on failure."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,8 +22,8 @@ from scripts.bench_selftest import (  # noqa: E402
     _thinking_check,
     main,
 )
-from scripts.lib.harness import LegArgs, leg_config  # noqa: E402
-from scripts.lib.model import ModelConfig  # noqa: E402
+from scripts.lib.harness import LegArgs  # noqa: E402
+from scripts.lib.model import ChatResponse, ModelConfig  # noqa: E402
 from tests import fixtures  # noqa: E402
 from tests.stub_json import JsonStub, completion  # noqa: E402
 
@@ -179,6 +181,88 @@ class GateTest(StubCase):
                 block = json.load(handle)
         self.assertEqual(block["gate"], "fail")
         self.assertTrue(block["checks"]["endpoint_models"].startswith("FAIL"))
+
+
+class CheckpointTest(unittest.TestCase):
+    """A killed selftest keeps its finished checks; the resume re-runs only the rest."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.out_dir = os.path.join(self.tmpdir.name, "results")
+        self.calls: list[str] = []
+
+    def fake_models(self, cfg: ModelConfig) -> tuple[bool, str, ChatResponse]:
+        self.calls.append("endpoint_models")
+        return True, "/v1/models lists test-model", ChatResponse(
+            status=200, payload={"data": [{"id": MODEL}]}, elapsed_s=1.0)
+
+    def fake_chat(self, cfg: ModelConfig, args: LegArgs) -> tuple[bool, str, ChatResponse]:
+        self.calls.append("one_token_chat")
+        return True, "one-token completion answered in 1.0s", ChatResponse(
+            status=200, payload=completion("ok", tokens=5), elapsed_s=1.0)
+
+    def fake_thinking(self, cfg: ModelConfig) -> tuple[bool, str]:
+        self.calls.append("thinking_switch")
+        return True, "thinking switch took"
+
+    def fake_imports(self, entries: list[tuple[str, str]] | None = None) -> tuple[bool, str]:
+        self.calls.append("leg_imports")
+        return True, "all 0 in-repo leg scripts import"
+
+    def run_main(self, kill_after: str | None = None) -> int:
+        checks = {"endpoint_models": "_models_check",
+                  "one_token_chat": "_chat_check",
+                  "thinking_switch": "_thinking_check",
+                  "leg_imports": "_leg_import_check"}
+        fakes = {"endpoint_models": self.fake_models,
+                 "one_token_chat": self.fake_chat,
+                 "thinking_switch": self.fake_thinking,
+                 "leg_imports": self.fake_imports}
+        with contextlib.ExitStack() as stack:
+            for name, attribute in checks.items():
+                fake: object = fakes[name]
+                if name == kill_after:
+                    def killer(*args: object, **kwargs: object) -> object:
+                        self.calls.append(name)
+                        raise KeyboardInterrupt("run killed")
+                    fake = killer
+                stack.enter_context(unittest.mock.patch(
+                    f"scripts.bench_selftest.{attribute}", fake))
+            return main(["--model", MODEL, "--endpoint", "http://127.0.0.1:1/v1",
+                         "--output-dir", self.out_dir], import_entries=[])
+
+    def block(self, out_dir: str) -> dict:
+        with open(os.path.join(out_dir, "selftest.result.json")) as handle:
+            return json.load(handle)
+
+    def cases_dir(self) -> str:
+        return os.path.join(self.out_dir, "cases", "selftest")
+
+    def test_a_kill_after_the_first_check_leaves_exactly_one_on_disk(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main(kill_after="one_token_chat")
+        self.assertEqual(sorted(os.listdir(self.cases_dir())),
+                         ["endpoint_models.json"])
+
+    def test_a_resume_reruns_only_the_missing_checks_and_matches_the_full_run(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main(kill_after="one_token_chat")
+        self.calls.clear()
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.calls, ["one_token_chat", "thinking_switch",
+                                      "leg_imports"])
+        resumed = self.block(self.out_dir)
+
+        with tempfile.TemporaryDirectory() as other:
+            saved_dir, self.out_dir = self.out_dir, os.path.join(other, "results")
+            self.calls.clear()
+            try:
+                self.assertEqual(self.run_main(), 0)
+                full = self.block(self.out_dir)
+            finally:
+                self.out_dir = saved_dir
+        self.assertEqual(resumed, full)
 
 
 if __name__ == "__main__":

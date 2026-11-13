@@ -18,14 +18,19 @@ from scripts.lib.harness import (  # noqa: E402
     LegArgs,
     Tally,
     ask,
+    case_record,
     finish,
     leg_config,
+    load_case,
     load_items,
     parse_leg_args,
+    replay_response,
+    write_case,
 )
 
 SYSTEM_PROMPT = ("Answer directly and concisely. No preamble. No meta-commentary. "
                  "No sign-off. Stay on topic; stop when the answer is complete.")
+LEG_ID = "math500"
 
 
 # ---------- grading ----------
@@ -92,23 +97,30 @@ def _grade_answer(gold: str, pred: str) -> bool:
 
 
 def run_math500(args: LegArgs) -> Tally:
-    """One ask per item; grade what comes back and tally it."""
+    """One ask per item; grade what comes back, checkpoint it and tally it."""
     cfg = leg_config(args)
     items = load_items(args.data, args.limit)
     tally = Tally()
-    for item in items:
+    for index, item in enumerate(items):
+        case_id = f"{index:05d}"
+        saved = load_case(args, LEG_ID, case_id)
+        if saved is not None:
+            tally.record(replay_response(saved), correct=saved.get("correct"))
+            print(f"  [{tally.items}/{len(items)}] reused ({case_id})", flush=True)
+            continue
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item["problem"]},
         ]
         response = ask(cfg, messages, args)
+        passed: bool | None = None
         if response.ok:
             passed = _grade_answer(item["answer"], response.answer() or "")
-            tally.record(response, correct=passed)
             mark = "\u2713" if passed else "\u2717"
         else:
-            tally.record(response)
             mark = "!"
+        tally.record(response, correct=passed)
+        write_case(args, LEG_ID, case_id, case_record(case_id, response, correct=passed))
         print(f"  [{tally.items}/{len(items)}] {mark} ({response.elapsed_s:.1f}s)",
               flush=True)
     return tally
@@ -119,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
                           argv=argv)
     print(f"MATH-500 [{args.model}] cap {args.cap} thinking {args.thinking}",
           flush=True)
-    finish("math500", args, run_math500(args))
+    finish(LEG_ID, args, run_math500(args))
 
 
 if __name__ == "__main__":

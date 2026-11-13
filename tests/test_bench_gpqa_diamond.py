@@ -9,18 +9,22 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from scripts.bench_gpqa_diamond import (  # noqa: E402
+    LEG_ID,
     extract_letter,
     grade,
     main,
+    run_leg,
+    totals,
 )
 from scripts.lib.harness import LegArgs, result_path  # noqa: E402
 from scripts.lib.model import ChatResponse  # noqa: E402
-from tests.stub_json import JsonStub, completion  # noqa: E402
+from tests.stub_json import DieAfter, FakeAsk, JsonStub, completion  # noqa: E402
 
 
 def args_for(stub: JsonStub, data_path: str, output_dir: str) -> LegArgs:
@@ -160,6 +164,65 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(block["items"], 2)
             finally:
                 stub.close()
+
+
+class CheckpointTest(unittest.TestCase):
+    """A killed run keeps its finished cases; the resume generates only the rest."""
+
+    QUESTIONS = ("Which force keeps planets in orbit?",
+                 "Which particle carries a negative charge?")
+    ITEMS = [
+        {"question": QUESTIONS[0], "answer": r"\boxed{C}"},
+        {"question": QUESTIONS[1], "answer": r"\boxed{A}"},
+    ]
+    ANSWERS = {QUESTIONS[0]: "C", QUESTIONS[1]: "A"}
+
+    def setUp(self) -> None:
+        self.fake = FakeAsk(self.ANSWERS)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.data_path = os.path.join(self.tmpdir.name, "items.json")
+        with open(self.data_path, "w") as handle:
+            json.dump(self.ITEMS, handle)
+        self.out_dir = os.path.join(self.tmpdir.name, "results")
+
+    def args(self) -> LegArgs:
+        return replace(LegArgs(model="stub-model"), data=self.data_path,
+                       output_dir=self.out_dir, cap=1024, timeout_s=30)
+
+    def cases_dir(self) -> str:
+        return os.path.join(self.out_dir, "cases", LEG_ID)
+
+    def block(self, args: LegArgs, tally, rows: list[dict]) -> dict:
+        return tally.to_result(LEG_ID, args, {"per_item": rows, **totals(rows)})
+
+    def run_leg_with(self, ask: FakeAsk | DieAfter) -> tuple:
+        with unittest.mock.patch("scripts.bench_gpqa_diamond.ask", ask):
+            return run_leg(self.args())
+
+    def test_a_kill_after_the_first_case_leaves_exactly_one_on_disk(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.assertEqual(sorted(os.listdir(self.cases_dir())), ["00000.json"])
+
+    def test_a_resume_generates_only_the_missing_case_and_matches_the_full_run(self) -> None:
+        args = self.args()
+        full = self.run_leg_with(self.fake)
+        full_block = self.block(args, *full)
+        self.assertEqual(len(self.fake.calls), 2)
+
+        # Fresh directory: one case lands, the run dies, the resume finishes the leg.
+        self.setUp()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_leg_with(DieAfter(self.fake, die_on=1))
+        self.fake.calls.clear()
+        args = self.args()
+        resumed = self.run_leg_with(self.fake)
+        resumed_block = self.block(args, *resumed)
+        self.assertEqual(self.fake.calls, [self.QUESTIONS[1]])
+        self.assertEqual(sorted(os.listdir(self.cases_dir())),
+                         ["00000.json", "00001.json"])
+        self.assertEqual(resumed_block, full_block)
 
 
 if __name__ == "__main__":

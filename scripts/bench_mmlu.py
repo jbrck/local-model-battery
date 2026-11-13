@@ -68,24 +68,33 @@ def items_hash(items: list[dict]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def run_mmlu(cfg: ModelConfig, items: list[dict], args) -> harness.Tally:
-    """Score every item once and report progress while resuming-friendly."""
+def run_mmlu(cfg: ModelConfig, items: list[dict], args: harness.LegArgs) -> harness.Tally:
+    """Score every item once, checkpoint each case and report progress."""
     total = len(items)
     tally = harness.Tally()
     for index, item in enumerate(items):
+        case_id = f"{index:05d}"
+        saved = harness.load_case(args, LEG_ID, case_id)
+        if saved is not None:
+            tally.record(harness.replay_response(saved), correct=saved.get("correct"))
+            print(f"[{index + 1}/{total}] reused ({item.get('id', case_id)})", flush=True)
+            continue
         messages = [{"role": "user", "content": build_prompt(item)}]
         response = harness.ask(cfg, messages, args)
         gold = item["answer"]
         if response.ok:
             predicted = parse_letter(response.content)
-            tally.record(response,
-                         correct=(predicted == gold) if predicted else False)
+            correct: bool | None = (predicted == gold) if predicted else False
+            tally.record(response, correct=correct)
             print(f"[{index + 1}/{total}] gold={gold} got={predicted} "
                   f"{tally.correct}/{tally.scored}", flush=True)
         else:
+            correct = None
             tally.record(response)
-            print(f"[{index + 1}/{total}] skipped ({response.error})",
-                  flush=True)
+            print(f"[{index + 1}/{total}] skipped ({response.error})", flush=True)
+        harness.write_case(args, LEG_ID, case_id,
+                           harness.case_record(case_id, response, correct=correct,
+                                               item=item.get("id")))
     return tally
 
 
