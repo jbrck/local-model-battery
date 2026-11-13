@@ -145,7 +145,7 @@ file = "data/ifbench_prompts.json"
 sha256_16 = "8488fb465bb46bad"
 items = 300
 source = "allenai/IFBench_test"
-license = "Apache-2.0"
+license = "ODC-BY-1.0"
 
 [[data.bundled]]
 file = "data/mmlu_test.json"
@@ -220,7 +220,7 @@ path_env = ""
 sha256_16 = ""
 items = 300
 source = "allenai/IFBench_test"
-license = "Apache-2.0"
+license = "ODC-BY-1.0"
 fetch = "huggingface-cli download allenai/IFBench_test"
 
 [[data.external]]

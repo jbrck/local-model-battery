@@ -8,13 +8,28 @@ endpoint — llama.cpp, vLLM, Ollama, LiteLLM, or a hosted API. Two kinds of sco
 
 ## What it tests
 
-| Test | Size | What it measures | Scoring |
-|---|---|---|---|
-| MATH-500 | 500 problems | Symbolic math reasoning | sympy answer equivalence |
-| HumanEval+ | 164 tasks | Python generation, functional correctness | bundled test suite, subprocess |
-| GPQA-Diamond | 198 questions | Graduate-level science | multiple choice, exact letter |
-| Instr v2 | 20 tasks | Constraint adherence (one constraint each) | mechanical check |
-| Writing Suite v1 | 138 tasks | Prose quality across 8 writing jobs | blind rubric judge, 1-10 |
+| Leg | `--legs` id | Size | What it measures | Scoring |
+|---|---|---|---|---|
+| Endpoint selftest | `selftest` | 2 items | that the endpoint answers and the harnesses import, before a real leg burns budget | exit code; refuses the battery on failure |
+| MATH-500 | `math500` | 500 problems | symbolic math reasoning, boxed final answers | sympy equivalence |
+| HumanEval+ | `humaneval_plus` | 164 tasks | Python functional correctness against an extended hidden suite | pass@1, each candidate executed in a subprocess |
+| GPQA Diamond | `gpqa_diamond` | 198 questions | graduate-level science reasoning | letter match |
+| MMLU (generative) | `mmlu` | 500 of 14042 | broad knowledge, asked as a question rather than a logprob | letter match on a seeded sample |
+| Instruction Following v2 | `instr_v2` | 20 tasks | adherence to soft and hard constraints | per-constraint rubric, mechanical |
+| IFEval | `ifeval` | prompt set | verifiable instruction following at scale | strict and loose prompt-level and instruction-level accuracy ‡ |
+| IFBench | `ifbench` | 300 prompts | out-of-domain instruction following | NLTK verifier, strict and loose ‡ |
+| Tool calling | `toolbench` | 69 scenarios | tool selection, argument construction, multi-turn use | scenario pass rate ‡ |
+| LiveCodeBench | `lcb` | 175 problems | competitive programming against official test suites | `lcb_runner` codegen metrics, generated code executed ‡ |
+| Reasoning | `reasoning` | 8 tasks | whether the model emits a trace at all, and how many tokens it takes | trace presence and trace length |
+| Refusal battery | `refusal` | 70 prompts | harmful-request refusal, edgy-prompt discrimination, benign over-refusal | three separate counts, never averaged |
+| HermesAgent-20 | `hermesagent20` | 20 scenarios | end-to-end agentic work on real tasks | artifact checks in a Docker sandbox running a pinned agent ‡ |
+| Writing Suite v1 | `writing` | 138 tasks | instruction-following and craft on long-form prompts | blind rubric judge, 1-10 per criterion |
+
+‡ needs data or tooling that this repo does not ship: the IFEval and tool-calling legs want
+`tool-eval-bench`, IFBench wants the NLTK corpora, LiveCodeBench wants its own checkout and the
+release_v6 lite jsonl, and HermesAgent-20 wants Docker plus a pinned agent CLI. The setup skill names
+the environment variable for each, and the planner reports a missing prerequisite as a leg that does
+not run rather than a leg that scores zero.
 
 The writing suite replaced pairwise prose ELO. Pairwise judging proved unusable:
 the "Sample A" slot won **75%** of decided verdicts, far from the ~50% an unbiased
@@ -180,11 +195,16 @@ Code is MIT (see `LICENSE`). The bundled datasets keep their own licenses:
 |---|---|---|
 | `data/math500.json` | MATH (Hendrycks et al.) | MIT |
 | `data/humaneval_plus.json` | HumanEval (Chen et al.), plus tests | MIT / Apache-2.0 |
-| `data/gpqa_diamond.json` | GPQA (Rein et al.) | CC BY 4.0 |
+| `data/gpqa_diamond.json` | GPQA (Rein et al.), diamond subset | CC BY 4.0 |
+| `data/mmlu_test.json` | `cais/mmlu` test split, seeded 500-row sample | MIT |
 | `data/instr_v2_tasks.json` | Original | MIT |
+| `data/ifbench_prompts.json` | `allenai/IFBench` test data | ODC-BY-1.0, Ai2 responsible-use terms |
+| `data/reasoning_tasks.json` | Original | MIT |
+| `data/refusal_prompts.json` | Original | MIT |
 | `data/writing_suite_v1.json` | Original | MIT |
 
-Check the upstream terms before redistributing a dataset in another product.
+The data the four outside legs read is not redistributed here. Check the upstream terms before
+redistributing a dataset in another product.
 
 ## AI-assisted setup
 
