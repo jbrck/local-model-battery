@@ -235,6 +235,15 @@ import only runs when the tests load as a package. Without `-t .` a fresh clone 
 failures before the operator ran anything. A setup script that ends in a red suite is worse than no
 setup script.
 
+A fix that lives only in documentation does not hold. The command came back in an ad-hoc run on
+2026-11-12 and produced the same three failures, which read exactly like a code regression: the
+harness had bound `http://localhost:11434/v1` at import, three assertions wanted the dead port, and
+nothing in the failure text mentions import order. `tests/__init__.py` now forces
+`BATTERY_DEFAULT_ENDPOINT` (it was `setdefault`, so an ambient export could win, which is the one
+case the guard exists to catch) and rebinds the already-imported `scripts.lib.harness` module, and
+`test_endpoint_guard.py` imports the package before the harness. `-t .` is still the command to use;
+it is no longer the difference between a green run and a red one.
+
 ## The interpreter path pointed at a python that could not run the leg (2026-11-12)
 
 The entry above put an absolute path on the LCB leg: `/mnt/data/benchmark-venv/bin/python3`. Two

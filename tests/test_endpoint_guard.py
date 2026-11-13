@@ -2,8 +2,8 @@
 import os
 import unittest
 
+from tests import DEAD_ENDPOINT  # noqa: E402  imported first: it points the default at a dead port
 from scripts.lib.harness import DEFAULT_ENDPOINT, leg_config, parse_leg_args
-from tests import DEAD_ENDPOINT
 
 
 class EndpointGuardTest(unittest.TestCase):
