@@ -17,7 +17,9 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from scripts.lib.env_probe import Gpu, HostFacts  # noqa: E402
+from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
+from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
 from scripts.lib.plan_run import (  # noqa: E402
     Decision,
     KIND_CAPACITY,
@@ -38,6 +40,7 @@ from tests.fixtures import (  # noqa: E402
     FREE,
     PAIR,
     PILOT,
+    RICH,
     SHAPELESS,
     SMALL,
     STANDARD,
@@ -47,6 +50,90 @@ from tests.fixtures import (  # noqa: E402
     plan,
     runnable,
 )
+
+
+class ShapeSourceTest(unittest.TestCase):
+    """The sheet says whether the model's own numbers made the fit or a profile's did.
+
+    The numbers themselves are the model probe's business. What matters here is that the plan
+    carries the source, because a fit built on a typed-in shape and one built on the file read
+    exactly the same on the sheet otherwise, and on this box one of them was wrong by 4x.
+    """
+
+    READ = ModelShape(arch="qwen35", n_layers=17, n_kv_heads=4, head_dim=256,
+                      kv_elements_per_token=4352, kv_fixed_elements=8 * 1024 * 1024,
+                      weights_bytes=int(4.25 * 1024 ** 3), source="gguf",
+                      path="/mnt/models/llamacpp/swift-qwen3.8-27B/Swift-Qwen3.8-27B-Q4_K_M.gguf")
+
+    def test_a_read_shape_is_named_and_priced(self):
+        result = plan(FITS, shape=self.READ)
+        self.assertEqual(result.footprint.source, "gguf")
+        self.assertEqual(result.footprint.kv_bytes_per_token, 4352)
+        self.assertEqual(result.footprint.kv_fixed_bytes, 8 * 1024 * 1024)
+        self.assertIn("gguf", result.render())
+        self.assertIn("8 MB fixed", result.render())
+
+    def test_a_read_shape_beats_the_profile(self):
+        """The profile claims 64 layers of 8x128; the file says 17 of 4x256. The file wins."""
+        read = plan(FITS, shape=self.READ)
+        typed = plan(FITS)
+        self.assertEqual(typed.footprint.kv_bytes_per_token, 131072)
+        self.assertEqual(read.footprint.kv_bytes_per_token, 4352)
+
+    def test_a_typed_shape_says_the_numbers_were_typed(self):
+        result = plan(FITS)
+        self.assertEqual(result.footprint.source, "profile")
+        self.assertIn("profile", result.render())
+        self.assertTrue(result.footprint.notes)
+
+    def test_a_shape_nobody_can_read_claims_nothing(self):
+        result = plan(SHAPELESS, shape=ModelShape(problems=("no header",)))
+        self.assertFalse(result.footprint.known)
+        self.assertIn("shape unknown", result.render())
+
+    def test_the_source_survives_the_round_trip(self):
+        original = plan(FITS, shape=self.READ)
+        restored = plan_from_dict(json.loads(json.dumps(original.to_dict())))
+        self.assertEqual(restored.footprint.source, "gguf")
+        self.assertEqual(restored.footprint.notes, original.footprint.notes)
+        self.assertEqual(restored.render(), original.render())
+
+
+class VramCreditTest(unittest.TestCase):
+    """A model left loaded while the run is planned must not be counted against itself.
+
+    Planning with the server already up is the normal order of operations, so this decides the
+    tier on the sheet: 19.0 GB of a 24 GB card belongs to the model under test or it does not.
+    """
+
+    HOST = replace(RICH, gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+                   compute_apps=({"gpu_uuid": "GPU-1", "pid": "1748",
+                                  "process_name": "llama-server", "used_memory_mb": 19414.0},
+                                 {"gpu_uuid": "GPU-1", "pid": "8248",
+                                  "process_name": "python3", "used_memory_mb": 256.0}))
+    READ = replace(ShapeSourceTest.READ, path="/mnt/models/llamacpp/swift/q4.gguf")
+
+    def test_the_vram_the_endpoint_holds_is_credited_to_the_run(self):
+        counted = plan(FITS, host=self.HOST, shape=self.READ)
+        credited = plan(FITS, host=self.HOST, shape=self.READ, serving_pid=1748)
+        self.assertEqual(counted.fit.tier, "T2")
+        self.assertEqual(credited.fit.tier, "T1")
+        self.assertEqual(credited.fit.max_ctx, credited.fit.preferred_ctx)
+
+    def test_the_credit_is_stated_on_the_sheet(self):
+        credited = plan(FITS, host=self.HOST, shape=self.READ, serving_pid=1748)
+        self.assertTrue(any("credited to this run" in warning for warning in credited.warnings))
+
+    def test_a_profile_shape_credits_nothing(self):
+        """The profile says nothing about what the loaded server is holding."""
+        result = plan(FITS, host=self.HOST, serving_pid=1748)
+        self.assertEqual(result.fit.tier, "T2")
+        self.assertFalse(any("credited" in warning for warning in result.warnings))
+
+    def test_no_pid_means_no_credit(self):
+        result = plan(FITS, host=self.HOST, shape=self.READ)
+        self.assertEqual(result.fit.tier, "T2")
+        self.assertFalse(any("credited" in warning for warning in result.warnings))
 
 
 class FitAndWindowTest(unittest.TestCase):

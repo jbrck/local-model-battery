@@ -11,7 +11,8 @@ from dataclasses import fields
 from scripts.lib.config import load_toml
 from scripts.lib.fit import Fit
 from scripts.lib.legs import Leg, load_legs
-from scripts.lib.plan_run import Decision, Option, PlannedLeg, RunPlan, Skip
+from scripts.lib.plan_run import (Decision, Footprint, Option, PlannedLeg, RunPlan, Skip,
+                                  unknown_footprint)
 from scripts.lib.prereqs import Dependency
 
 STANDARD_FILE = "standard.toml"
@@ -25,6 +26,16 @@ def _known(target: type, payload: dict) -> dict:
 
 def _fit(payload: dict) -> Fit:
     return Fit(**_known(Fit, payload))
+
+
+def _footprint(payload: dict | None) -> Footprint:
+    """The model's numbers as they were stamped, so the sheet reads the same a day later."""
+    if not payload:
+        return unknown_footprint()
+    known = _known(Footprint, payload)
+    known["notes"] = tuple(known.get("notes") or ())
+    known["missing"] = tuple(known.get("missing") or ())
+    return Footprint(**known)
 
 
 def _decision(payload: dict) -> Decision:
@@ -71,4 +82,5 @@ def plan_from_dict(payload: dict, legs: list[Leg] | None = None) -> RunPlan:
         standard_md5=payload.get("standard_md5", ""),
         profile_path=profile.get("path", ""),
         profile_md5=profile.get("md5", ""),
+        footprint=_footprint(payload.get("footprint")),
     )

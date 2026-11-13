@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.lib.config import load_toml  # noqa: E402
 from scripts.lib.env_probe import Gpu, HostFacts, ToolFact  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
+from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_run import RunPlan, plan_run  # noqa: E402
 from scripts.lib.prereqs import Judge  # noqa: E402
@@ -63,9 +64,10 @@ FREE = ("math500", "mmlu")
 
 def plan(profile: dict = FITS, standard: dict | None = None, host: HostFacts = RICH,
          server: ServerFacts = SERVER, pilot: PilotResult = PILOT,
-         judge: Judge | None = JUDGE, selected: tuple[str, ...] = ()) -> RunPlan:
+         judge: Judge | None = JUDGE, selected: tuple[str, ...] = (),
+         shape: ModelShape | None = None, serving_pid: int | None = None) -> RunPlan:
     return plan_run(standard or STANDARD, LEGS, VARIABLES, profile, host, server, pilot,
-                    judge, selected)
+                    judge, selected, model_shape=shape, serving_pid=serving_pid)
 
 
 def runnable(result: RunPlan, leg_id: str):

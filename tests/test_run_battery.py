@@ -65,6 +65,7 @@ class FakeRun(unittest.TestCase):
 
     def args(self, **changes) -> argparse.Namespace:
         base = dict(model="arete-27b", profile="profiles/example.toml",
+                    model_file="", model_dir="",
                     endpoint="http://127.0.0.1:11434/v1", api_key="not-needed",
                     out=str(self.out), resume=False, no_budget_kill=False)
         base.update(changes)

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Plan a battery run: probe the host and the endpoint, then print the decision sheet.
 
-    python3 scripts/plan_run.py --profile profiles/arete-27b.toml --endpoint URL \\
-        --model served-name [--legs math500,gpqa_diamond] [--json] [--no-probe]
+    python3 scripts/plan_run.py --endpoint URL --model served-name [--json] [--no-probe]
+
+The model's shape is read from the model itself: the file the endpoint reports it loaded, or
+one named with --model-file. A profile is only needed for a model that neither reader can
+reach, and then only for the numbers it holds that the readers could not supply.
 
 Nothing is started and nothing is written. The sheet is what the setup skill walks the
 operator through before a single leg runs.
@@ -17,10 +20,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
-from scripts.lib.env_probe import probe_host  # noqa: E402
+from scripts.lib.env_probe import probe_host, serving_pid_for  # noqa: E402
 from scripts.lib.judge import resolve_judge_defaults  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.model import ModelConfig  # noqa: E402
+from scripts.lib.model_probe import resolve_model_shape  # noqa: E402
 from scripts.lib.pilot import run_pilot  # noqa: E402
 from scripts.lib.plan_run import plan_run  # noqa: E402
 from scripts.lib.prereqs import Judge  # noqa: E402
@@ -32,7 +36,12 @@ STANDARD_FILE = "standard.toml"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", required=True, help="model profile TOML")
+    parser.add_argument("--profile", default="",
+                        help="model profile TOML; only for what the probes cannot read")
+    parser.add_argument("--model-file", default="",
+                        help="the GGUF or model directory to read the shape from")
+    parser.add_argument("--model-dir", default="",
+                        help="a HF model directory when the weights are safetensors")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434/v1",
                         help="OpenAI-compatible base URL")
     parser.add_argument("--model", default="", help="served model name")
@@ -75,15 +84,24 @@ def probe_from_args(args: argparse.Namespace):
     standard = load_toml(STANDARD_FILE)
     legs = load_legs(standard)
     variables = load_variables()
-    profile = load_toml(args.profile)
-    profile.setdefault("id", args.model or Path(args.profile).stem)
+    profile = load_toml(args.profile) if args.profile else {}
+    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
+    profile.setdefault("id", fallback)
     host = probe_host()
     cfg = ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
                       api_key=args.api_key)
     server, pilot = _probes(args, cfg)
     judge = _judge(args, cfg, standard)
+    # The shape comes from the model, not from the profile: the file the endpoint says it
+    # loaded, or the one named on the command line, or the profile as a last resort.
+    shape = resolve_model_shape(model_file=args.model_file, model_dir=args.model_dir,
+                                props=getattr(server, "props", None), profile=profile)
     selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
-    plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected)
+    # The process answering the endpoint is holding the model under test. Naming it lets the
+    # fit credit those weights to this run instead of counting them as someone else's.
+    pid = None if args.no_probe else serving_pid_for(args.endpoint)
+    plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected,
+                    model_shape=shape, serving_pid=pid)
     return plan, host, server, pilot
 
 

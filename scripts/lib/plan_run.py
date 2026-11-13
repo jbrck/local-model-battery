@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from scripts.lib.config import get_dotted, resolve_md5
-from scripts.lib.env_probe import HostFacts
+from scripts.lib.env_probe import HostFacts, vram_held_gb
 from scripts.lib.fit import (
     BYTES_PER_GB,
     TIER_MANAGED,
@@ -20,6 +20,7 @@ from scripts.lib.fit import (
     parse_kv_bits,
 )
 from scripts.lib.legs import Leg, resolve_cap
+from scripts.lib.model_probe import SOURCE_PROFILE, SOURCE_UNKNOWN, ModelShape
 from scripts.lib.pilot import PilotResult
 from scripts.lib.prereqs import (
     Dependency,
@@ -87,16 +88,30 @@ class Footprint:
     known: bool
     missing: tuple[str, ...] = ()
     kv_type: str = ""
+    kv_fixed_bytes: int = 0
+    source: str = ""
+    path: str = ""
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
             "weights_bytes": self.weights_bytes,
             "weights_gb": round(self.weights_bytes / BYTES_PER_GB, 2),
             "kv_bytes_per_token": self.kv_bytes_per_token,
+            "kv_fixed_bytes": self.kv_fixed_bytes,
             "kv_type": self.kv_type,
             "known": self.known,
+            "source": self.source,
+            "path": self.path,
+            "notes": list(self.notes),
             "missing": list(self.missing),
         }
+
+
+def unknown_footprint() -> Footprint:
+    """What a plan carries when nothing read the model: no numbers, and it says so."""
+    return Footprint(weights_bytes=0, kv_bytes_per_token=0, known=False,
+                     missing=("the shape was never read",), source=SOURCE_UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -200,6 +215,7 @@ class RunPlan:
     standard_md5: str = ""
     profile_path: str = ""
     profile_md5: str = ""
+    footprint: Footprint = field(default_factory=unknown_footprint)
 
     @property
     def needs_operator(self) -> tuple[Decision, ...]:
@@ -237,6 +253,7 @@ class RunPlan:
                         "model": self.model},
             "model": self.model,
             "fit": self.fit.to_dict(),
+            "footprint": self.footprint.to_dict(),
             "legs": [leg.to_dict() for leg in self.legs],
             "skips": [skip.to_dict() for skip in self.skips],
             "warnings": list(self.warnings),
@@ -254,9 +271,12 @@ class RunPlan:
             f"Battery {self.standard_version} plan -- {self.model}",
             "=" * 60,
             f"fit      {self.fit.tier} {self.fit.verdict}: {self.fit.reason}",
-            f"legs     {len(self.legs)} runnable, {len(self.skips)} skipped, "
-            f"{_hours(self.total_budget_s)} of worst-case budget",
         ]
+        shape_line = _shape_line(self.footprint)
+        if shape_line:
+            lines.append(shape_line)
+        lines.append(f"legs     {len(self.legs)} runnable, {len(self.skips)} skipped, "
+                     f"{_hours(self.total_budget_s)} of worst-case budget")
         lines += self._deviation_lines()
         if self.skips:
             lines.append("")
@@ -281,6 +301,22 @@ class RunPlan:
 
     def _skipped_lines(self) -> list[str]:
         return [f"  - {skip.leg}: {skip.reason}" for skip in self.skips]
+
+
+def _shape_line(footprint: Footprint) -> str:
+    """Where the model's numbers came from, since that is what decides whether to trust them.
+
+    A fit built on the model's own header and a fit built on a hand-typed profile look the
+    same on the sheet otherwise, and one of them was wrong by 4x on this box.
+    """
+    if not footprint.known:
+        detail = ", ".join(footprint.missing) or "unreadable"
+        return f"model    shape unknown ({detail}); the window is the engine's call"
+    fixed = (f" + {footprint.kv_fixed_bytes / 1024 ** 2:.0f} MB fixed"
+             if footprint.kv_fixed_bytes else "")
+    return (f"model    {footprint.source or 'unknown'}: "
+            f"{footprint.weights_bytes / BYTES_PER_GB:.2f} GB of weights, "
+            f"{footprint.kv_bytes_per_token} B/token of {footprint.kv_type} cache{fixed}")
 
 
 def _leg_line(planned: PlannedLeg) -> str:
@@ -346,10 +382,28 @@ def _digit(value: object, default: int) -> int:
     return int(_number(value, default))
 
 
-def model_footprint(profile: dict, standard: dict) -> Footprint:
-    """Weights in bytes plus KV bytes per token, from the profile's model shape."""
+def model_footprint(profile: dict, standard: dict,
+                    shape: ModelShape | None = None) -> Footprint:
+    """Weights in bytes plus the two KV costs, from the probed shape or the profile.
+
+    A probed shape is the model's own numbers, so it wins over the profile. The profile is
+    what remains for a model neither reader can reach, and the sheet says which one answered.
+    """
+    kv_type = str(get_dotted(profile, "model.kv_type")
+                  or get_dotted(standard, "serve.kv_k", "q8_0"))
+    if shape is not None and shape.known:
+        bits = parse_kv_bits(kv_type)
+        return Footprint(weights_bytes=shape.weights_bytes,
+                         kv_bytes_per_token=shape.kv_bytes_per_token(bits),
+                         kv_fixed_bytes=shape.kv_fixed_bytes(bits), known=True,
+                         kv_type=kv_type, source=shape.source, path=shape.path,
+                         notes=shape.notes)
+    return _profile_footprint(profile, kv_type)
+
+
+def _profile_footprint(profile: dict, kv_type: str) -> Footprint:
+    """The hand-typed profile path, kept for a model that no reader can describe."""
     shape = get_dotted(profile, "model", {}) or {}
-    kv_type = str(shape.get("kv_type") or get_dotted(standard, "serve.kv_k", "q8_0"))
     weights_gb = _number(profile.get("weights_gb"), 0.0)
     missing = [name for name in ("n_layers", "n_kv_heads", "head_dim")
                if not isinstance(shape.get(name), int)]
@@ -357,31 +411,59 @@ def model_footprint(profile: dict, standard: dict) -> Footprint:
         missing.insert(0, "weights_gb")
     if missing:
         return Footprint(weights_bytes=0, kv_bytes_per_token=0, known=False,
-                         missing=tuple(missing), kv_type=kv_type)
+                         missing=tuple(missing), kv_type=kv_type,
+                         source=SOURCE_PROFILE)
     per_token = kv_bytes_per_token(_digit(shape.get("n_layers"), 0),
                                    _digit(shape.get("n_kv_heads"), 0),
                                    _digit(shape.get("head_dim"), 0), parse_kv_bits(kv_type))
     return Footprint(weights_bytes=int(weights_gb * BYTES_PER_GB),
-                     kv_bytes_per_token=per_token, known=True, kv_type=kv_type)
+                     kv_bytes_per_token=per_token, known=True, kv_type=kv_type,
+                     source=SOURCE_PROFILE,
+                     notes=("numbers typed into the profile by hand, not read from "
+                            "the model",))
 
 
-def compute_plan_fit(profile: dict, standard: dict, host: HostFacts) -> tuple[Fit, Footprint]:
-    """Fit this model on this host, counting whatever else is already holding VRAM."""
-    footprint = model_footprint(profile, standard)
+def credited_vram_gb(host: HostFacts, footprint: Footprint,
+                     serving_pid: int | None) -> float:
+    """VRAM the endpoint holds that belongs to this run, which is often most of it.
+
+    Only when the shape came from a file: a profile-sourced shape says nothing about what the
+    loaded server is actually holding, so its VRAM stays counted against the run.
+    """
+    if serving_pid is None or not (footprint.known and footprint.path):
+        return 0.0
+    return vram_held_gb(host, {serving_pid})
+
+
+def compute_plan_fit(profile: dict, standard: dict, host: HostFacts,
+                     shape: ModelShape | None = None,
+                     serving_pid: int | None = None) -> tuple[Fit, Footprint]:
+    """Fit this model on this host, counting whatever else is already holding VRAM.
+
+    VRAM held by the process serving the endpoint is this run's own when the shape came from
+    that endpoint, because the model it holds is the model under test. Counting those weights
+    as someone else's counts them twice: on a 24 GB card holding a 17 GB model that reads as
+    tier two when the truth is tier one with the standard window.
+    """
+    footprint = model_footprint(profile, standard, shape)
     preferred = _digit(get_dotted(standard, "serve.ctx", 0), 0)
+    ours_gb = credited_vram_gb(host, footprint, serving_pid)
+    foreign_gb = max(0.0, host.vram_used_gb - ours_gb)
     if not footprint.known:
         # Without a model shape there is no KV number and no honest window, so the placement
         # question goes to the engine instead of being answered with a made-up figure.
+        detail = ", ".join(footprint.missing) or footprint.source
         return Fit(tier=TIER_MANAGED, vram_total_gb=host.vram_total_gb,
-                   vram_free_gb=max(0.0, host.vram_total_gb - host.vram_used_gb),
+                   vram_free_gb=max(0.0, host.vram_total_gb - foreign_gb),
                    weights_gb=0.0, vram_needed_gb=0.0, headroom_gb=0.0, max_ctx=preferred,
                    preferred_ctx=preferred, kv_bytes_per_token=0, estimate=True,
-                   reason="model shape unknown (" + ", ".join(footprint.missing)
+                   reason="model shape unknown (" + detail
                           + "): placement and window are the engine's call"), footprint
     fit = compute_fit(weights_bytes=footprint.weights_bytes,
                       kv_per_token=footprint.kv_bytes_per_token, gpus=host.gpus,
                       ram_available_gb=host.ram_available_gb, preferred_ctx=preferred,
-                      foreign_vram_used_gb=host.vram_used_gb)
+                      foreign_vram_used_gb=foreign_gb,
+                      kv_fixed_bytes=footprint.kv_fixed_bytes)
     return fit, footprint
 
 
@@ -826,7 +908,7 @@ def plan_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
                         "standard floor and the run may overrun")
     if host.compute_apps:
         warnings.append(f"{len(host.compute_apps)} other compute process(es) hold VRAM on this "
-                        "host; the fit above already discounts it, but the figure will move "
+                        "host; the fit counts it against this run, and the figure will move "
                         "under load")
     covered = {decision.variable.partition(":")[0] for decision in decisions}
     for variable in inputs.variables:
@@ -837,14 +919,30 @@ def plan_warnings(inputs: _PlanInputs, decisions: list[Decision]) -> list[str]:
     return warnings
 
 
+def serving_warnings(host: HostFacts, footprint: Footprint,
+                     serving_pid: int | None) -> list[str]:
+    """Say what the fit assumed about VRAM the endpoint is already holding.
+
+    Planning a run while the model is loaded is the normal order of operations, so the tier on
+    the sheet depends on whether those weights were credited to the run or counted against it.
+    """
+    ours_gb = credited_vram_gb(host, footprint, serving_pid)
+    if ours_gb <= 0:
+        return []
+    return [f"the endpoint is already holding {ours_gb:.1f} GB of VRAM and it is credited to "
+            f"this run as the model under test; anything else on the card is not"]
+
+
 def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile: dict,
              host: HostFacts, server: ServerFacts, pilot: PilotResult,
              judge: Judge | None = None, selected: tuple[str, ...] = (),
              standard_path: str = "standard.toml",
-             profile_path: str = "") -> RunPlan:
+             profile_path: str = "",
+             model_shape: ModelShape | None = None,
+             serving_pid: int | None = None) -> RunPlan:
     """Build the plan: fit, window, per-leg caps, decisions, warnings and the stamp."""
     chosen = [leg for leg in legs if not selected or leg.id in selected]
-    fit, footprint = compute_plan_fit(profile, standard, host)
+    fit, footprint = compute_plan_fit(profile, standard, host, model_shape, serving_pid)
     largest_cap = max((resolve_cap(leg, standard) for leg in chosen), default=0)
     ctx, ctx_decision = plan_ctx(standard, fit, footprint, largest_cap)
     request = str(profile.get("thinking") or THINKING_STANDARD)
@@ -865,9 +963,11 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
         standard_version=str(standard.get("standard_version", "unknown")),
         model=str(profile.get("id") or profile.get("name") or "unnamed-model"),
         fit=fit, legs=tuple(planned), decisions=tuple(decisions), skips=tuple(skips),
-        warnings=tuple(plan_warnings(inputs, decisions)),
+        warnings=tuple(plan_warnings(inputs, decisions)
+                       + serving_warnings(host, footprint, serving_pid)),
         stamp=build_stamp(variables, decisions),
         standard_md5=resolve_md5(standard_path),
         profile_path=profile_path,
         profile_md5=resolve_md5(profile_path),
+        footprint=footprint,
     )

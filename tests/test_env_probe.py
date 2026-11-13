@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -87,6 +89,65 @@ class HostFactsTest(unittest.TestCase):
         self.assertEqual(payload["vram_total_gb"], 20.0)
         self.assertEqual(payload["tools"][0]["available"], True)
         self.assertIn("compute_apps", payload)
+
+
+class VramAttributionTest(unittest.TestCase):
+    """Which VRAM belongs to the run and which belongs to something else.
+
+    The numbers here are from this box: one llama-server holding a 19.0 GB model on a 24 GB
+    card, and a python process holding 256 MB that has nothing to do with the run.
+    """
+
+    SS_LINE = ('LISTEN 0 512 0.0.0.0:11434 0.0.0.0:* '
+               'users:(("llama-server",pid=1748,fd=16))')
+    APPS = ({"gpu_uuid": "GPU-1", "pid": "1748", "process_name": "llama-server",
+             "used_memory_mb": 19414.0},
+            {"gpu_uuid": "GPU-1", "pid": "8248", "process_name": "python3",
+             "used_memory_mb": 256.0})
+
+    def _ss(self, stdout: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+    def _host(self) -> HostFacts:
+        return HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+                         compute_apps=self.APPS)
+
+    def test_the_listener_pid_is_read_from_ss(self):
+        with mock.patch.object(env_probe, "_run", return_value=self._ss(self.SS_LINE)):
+            self.assertEqual(env_probe.listener_pid(11434), 1748)
+
+    def test_a_port_with_no_owner_reports_no_pid(self):
+        """LiteLLM runs in a container, so the host sees the port and no process."""
+        with mock.patch.object(env_probe, "_run",
+                               return_value=self._ss("LISTEN 0 4096 0.0.0.0:4000 0.0.0.0:*")):
+            self.assertIsNone(env_probe.listener_pid(4000))
+
+    def test_ss_refusing_to_run_reports_no_pid(self):
+        with mock.patch.object(env_probe, "_run",
+                               return_value=subprocess.CompletedProcess([], 1, "", "denied")):
+            self.assertIsNone(env_probe.listener_pid(11434))
+
+    def test_a_local_endpoint_looks_up_its_port(self):
+        with mock.patch.object(env_probe, "listener_pid", return_value=1748) as lookup:
+            self.assertEqual(env_probe.serving_pid_for("http://127.0.0.1:11434/v1"), 1748)
+        lookup.assert_called_once_with(11434)
+
+    def test_an_endpoint_on_another_machine_has_no_local_pid(self):
+        self.assertIsNone(env_probe.serving_pid_for("http://100.117.19.78:11434/v1"))
+        self.assertIsNone(env_probe.serving_pid_for("http://box:11434/v1"))
+        self.assertIsNone(env_probe.serving_pid_for("not a url at all"))
+
+    def test_only_the_named_pids_are_counted(self):
+        host = self._host()
+        self.assertAlmostEqual(env_probe.vram_held_gb(host, {1748}), 19414 / 1024, places=3)
+        self.assertAlmostEqual(env_probe.vram_held_gb(host, {1748, 8248}), 19670 / 1024, places=3)
+        self.assertEqual(env_probe.vram_held_gb(host, set()), 0.0)
+
+    def test_a_row_with_an_unreadable_pid_is_skipped(self):
+        odd = HostFacts(gpus=self._host().gpus,
+                        compute_apps=({"pid": "n/a", "used_memory_mb": 512.0},
+                                      {"pid": "8248", "used_memory_mb": None}))
+        self.assertEqual(env_probe.vram_held_gb(odd, {1748, 8248}), 0.0)
 
 
 class ProcessProbeTest(unittest.TestCase):

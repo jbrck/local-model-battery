@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 PROBE_TIMEOUT_S = 20
 MEBIBYTE = 1024 * 1024
@@ -195,6 +197,54 @@ def _query_compute_apps() -> tuple[dict, ...]:
         apps.append({"gpu_uuid": parts[0], "pid": parts[1],
                      "process_name": parts[2], "used_memory_mb": _optional_float(parts[3])})
     return tuple(apps)
+
+
+LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def listener_pid(port: int) -> int | None:
+    """The pid holding a local TCP port, when this user is allowed to see it.
+
+    A container's port shows no owner from the host, so an endpoint behind a proxy has no pid
+    here. That is not an error: the caller falls back to counting the VRAM as someone else's.
+    """
+    result = _run(["ss", "-tlnpH", f"sport = :{port}"])
+    if result is None or result.returncode != 0:
+        return None
+    match = re.search(r"pid=(\d+)", result.stdout)
+    return int(match.group(1)) if match else None
+
+
+def serving_pid_for(endpoint: str) -> int | None:
+    """The pid serving an endpoint on this machine, or None when it is somewhere else."""
+    try:
+        parsed = urlparse(endpoint)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    if host not in LOCAL_HOSTS or port is None:
+        return None
+    return listener_pid(port)
+
+
+def vram_held_gb(host: HostFacts, pids: set[int]) -> float:
+    """VRAM held by these pids, from the compute-app list already collected.
+
+    Per-process use is what nvidia-smi reports, so this can undercount against the GPU-level
+    total. Undercounting here is the safe direction: the leftover shows up as foreign VRAM.
+    """
+    if not pids:
+        return 0.0
+    held_mb = 0.0
+    for app in host.compute_apps:
+        try:
+            pid = int(app.get("pid", ""))
+        except (TypeError, ValueError):
+            continue
+        if pid in pids:
+            held_mb += _optional_float(str(app.get("used_memory_mb", ""))) or 0.0
+    return held_mb / 1024
 
 
 def _meminfo_values(path: str) -> dict[str, float]:

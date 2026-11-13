@@ -45,9 +45,12 @@ class ProbeWiringTest(unittest.TestCase):
     }
 
     def _args(self, path: Path, endpoint: str, no_probe: bool) -> argparse.Namespace:
-        return argparse.Namespace(profile=str(path), endpoint=endpoint, model="",
-                                  api_key="not-needed", legs="math500", judge_model="",
-                                  judge_endpoint="", no_probe=no_probe)
+        # Built through the real parser: the probe path reads whatever the parser declares, so
+        # a hand-assembled Namespace stops matching the CLI the moment a flag is added.
+        argv = ["--profile", str(path), "--endpoint", endpoint, "--legs", "math500"]
+        if no_probe:
+            argv.append("--no-probe")
+        return cli.build_parser().parse_args(argv)
 
     def test_the_probe_path_hands_back_host_endpoint_and_pilot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,7 +89,8 @@ class CliTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def args(self, **changes) -> argparse.Namespace:
-        base = dict(profile=str(self.path), endpoint="http://box:11434/v1", model="served-id",
+        base = dict(profile=str(self.path), model_file="", model_dir="",
+                    endpoint="http://box:11434/v1", model="served-id",
                     api_key="not-needed", legs="", judge_model="", judge_endpoint="",
                     no_probe=True, json=False)
         base.update(changes)

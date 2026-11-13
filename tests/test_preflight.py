@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from scripts.lib.env_probe import Gpu, HostFacts  # noqa: E402
+from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.plan_run import plan_run  # noqa: E402
 from scripts.preflight import (  # noqa: E402
     Check,
@@ -136,7 +137,25 @@ class HostCheckTest(unittest.TestCase):
         busy = replace(RICH, compute_apps=({"pid": 42, "name": "llama-server"},))
         check = named(check_host(plan(FITS, host=busy), busy), "host:idle")
         self.assertFalse(check.blocks)
-        self.assertIn("1 other compute process", check.detail)
+        self.assertIn("1 compute process", check.detail)
+        self.assertIn("counted against it", check.detail)
+
+    def test_the_vram_credited_to_the_run_is_spelled_out(self):
+        """The operator should see that the tier rests on crediting the loaded model to the run."""
+        host = replace(RICH, gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+                       compute_apps=({"pid": "1748", "used_memory_mb": 19414.0},))
+        shape = ModelShape(arch="qwen35", n_layers=17, n_kv_heads=4, head_dim=256,
+                           kv_elements_per_token=4352, weights_bytes=int(4.25 * 1024 ** 3),
+                           source="gguf", path="/mnt/models/swift/q4.gguf")
+        checks = check_host(plan(FITS, host=host, shape=shape, serving_pid=1748), host)
+        credit = named(checks, "host:credit")
+        self.assertFalse(credit.blocks)
+        self.assertIn("credited to this run", credit.detail)
+
+    def test_a_run_that_credits_nothing_says_nothing_about_credits(self):
+        host = replace(RICH, compute_apps=({"pid": "8248", "used_memory_mb": 256.0},))
+        keys = {check.name for check in check_host(plan(FITS, host=host), host)}
+        self.assertNotIn("host:credit", keys)
 
     def test_swap_use_warns_about_noisy_timing(self):
         swapped = replace(RICH, swap_used_gb=8.0)

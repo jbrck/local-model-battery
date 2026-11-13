@@ -68,7 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="", help="served model name (defaults to profile id)")
-    parser.add_argument("--profile", required=True, help="model profile TOML")
+    parser.add_argument("--profile", default="",
+                        help="model profile TOML; only for what the probes cannot read")
+    parser.add_argument("--model-file", default="",
+                        help="the GGUF or model directory to read the shape from")
+    parser.add_argument("--model-dir", default="",
+                        help="a HF model directory when the weights are safetensors")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--api-key", default="not-needed")
     parser.add_argument("--out", default="",

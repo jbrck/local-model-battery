@@ -19,10 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import load_toml  # noqa: E402
-from scripts.lib.env_probe import HostFacts, probe_host  # noqa: E402
+from scripts.lib.env_probe import HostFacts, probe_host, serving_pid_for  # noqa: E402
 from scripts.lib.fit import RAM_HEADROOM_GB  # noqa: E402
 from scripts.lib.legs import load_legs  # noqa: E402
 from scripts.lib.model import ModelConfig  # noqa: E402
+from scripts.lib.model_probe import resolve_model_shape  # noqa: E402
 from scripts.lib.pilot import PilotResult, run_pilot  # noqa: E402
 from scripts.lib.plan_run import BATTERY_VERSION, RunPlan, plan_run  # noqa: E402
 from scripts.lib.prereqs import Judge  # noqa: E402
@@ -121,8 +122,12 @@ def check_host(plan: RunPlan, host: HostFacts) -> list[Check]:
                             f"free; {RAM_HEADROOM_GB:.0f} GB has to stay spare"))
     if host.compute_apps:
         checks.append(Check("host:idle", True,
-                            f"{len(host.compute_apps)} other compute process(es) hold VRAM; "
-                            f"the fit above already discounts them", hard=False))
+                            f"{len(host.compute_apps)} compute process(es) hold VRAM on this "
+                            f"host; whatever this run does not own is counted against it",
+                            hard=False))
+    credited = [warning for warning in plan.warnings if "credited to this run" in warning]
+    if credited:
+        checks.append(Check("host:credit", True, credited[0], hard=False))
     if host.swap_used_gb and host.swap_used_gb > SWAP_TOLERANCE_GB:
         checks.append(Check("host:swap", True,
                             f"{host.swap_used_gb:.1f} GB in swap: this host is under memory "
@@ -192,7 +197,12 @@ def summarise(checks: list[Check]) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", required=True, help="model profile TOML")
+    parser.add_argument("--profile", default="",
+                        help="model profile TOML; only for what the probes cannot read")
+    parser.add_argument("--model-file", default="",
+                        help="the GGUF or model directory to read the shape from")
+    parser.add_argument("--model-dir", default="",
+                        help="a HF model directory when the weights are safetensors")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--model", default="")
     parser.add_argument("--api-key", default="not-needed")
@@ -205,9 +215,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _plan_from_args(args, standard: dict, legs):
-    """Probe the machine and the endpoint, then plan the run the arguments describe."""
-    profile = load_toml(args.profile)
-    profile.setdefault("id", args.model or Path(args.profile).stem)
+    """Probe the machine and the endpoint, then plan the run the arguments describe.
+
+    The model's shape is read from the model itself, so a profile is only needed for a model
+    that neither the GGUF header nor the HF config can describe.
+    """
+    profile = load_toml(args.profile) if args.profile else {}
+    fallback = args.model or (Path(args.profile).stem if args.profile else "model")
+    profile.setdefault("id", fallback)
     host = probe_host()
     cfg = ModelConfig(name=args.model or str(profile.get("id")), endpoint=args.endpoint,
                       api_key=args.api_key)
@@ -215,9 +230,12 @@ def _plan_from_args(args, standard: dict, legs):
     pilot = run_pilot(cfg)
     judge = Judge(model=args.judge_model or None, endpoint=args.judge_endpoint or None,
                   under_test=cfg.name)
+    shape = resolve_model_shape(model_file=args.model_file, model_dir=args.model_dir,
+                                props=getattr(server, "props", None), profile=profile)
     selected = tuple(item.strip() for item in args.legs.split(",") if item.strip())
+    pid = serving_pid_for(args.endpoint)
     plan = plan_run(standard, legs, load_variables(), profile, host, server, pilot, judge,
-                    selected, STANDARD_FILE, args.profile)
+                    selected, STANDARD_FILE, args.profile, model_shape=shape, serving_pid=pid)
     return plan, host, server, pilot
 
 
