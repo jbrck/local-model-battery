@@ -7,11 +7,16 @@ exits without a block, one that hangs past its budget, and one that already pass
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -247,6 +252,179 @@ class RunLegTest(FakeRun):
         args = self.args(no_budget_kill=True)
         self.assertEqual("pass",
                          run_battery.run_leg(planned, args, self.out, str(self.root), "m")["status"])
+
+
+class RunLegSafetyTest(FakeRun):
+    """A leg that dies must leave a mark, a name, and no children behind."""
+
+    def test_a_failed_leg_is_persisted_so_status_can_see_it(self):
+        write_script(self.root, "scripts/bench_math500.py", CRASH)
+        block = run_battery.run_leg(self.planned(), self.args(), self.out, str(self.root), "m")
+        path = self.out / "legs" / "math500.result.json"
+        self.assertTrue(path.exists(), "a failed leg must not read as 'not run'")
+        on_disk = json.loads(path.read_text())
+        self.assertEqual(on_disk["status"], "fail")
+        self.assertEqual(on_disk["exit_code"], 3)
+
+    def test_the_exception_a_leg_died_on_is_named(self):
+        write_script(self.root, "scripts/bench_math500.py", "x = 1 / 0\n")
+        block = run_battery.run_leg(self.planned(), self.args(), self.out, str(self.root), "m")
+        self.assertIn("ZeroDivisionError", block.get("last_error", ""))
+
+    def test_status_exits_nonzero_when_a_leg_is_dirty(self):
+        (self.out / "legs").mkdir(parents=True)
+        (self.out / "run-plan.json").write_text(
+            json.dumps({"legs": [{"id": "math500"}], "skips": []}))
+        (self.out / "legs" / "math500.result.json").write_text(json.dumps(
+            {"leg": "math500", "status": "stalled",
+             "reason": "no case written in the first 15 min",
+             "last_error": "ZeroDivisionError"}))
+        code = run_battery.main(["--profile", "profiles/example.toml", "--out", str(self.out),
+                                 "--status"])
+        self.assertEqual(code, 1)
+
+    def test_a_failed_leg_is_stalled_only_after_the_progress_window(self):
+        write_script(self.root, "scripts/bench_math500.py", HANG)
+        args = self.args(verify_after=0.5)
+        with mock.patch.object(run_battery, "POLL_SECONDS", 0.05):
+            block = run_battery.run_leg(self.planned(), args, self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "stalled")
+        self.assertIn("no case written", block["reason"])
+
+    def test_a_leg_that_writes_its_first_case_keeps_running(self):
+        keeps_going = ("import json, os, sys, time\n"
+                       "out = os.path.join(sys.argv[sys.argv.index('--output-dir') + 1],\n"
+                       "                  'cases', 'math500')\n"
+                       "os.makedirs(out, exist_ok=True)\n"
+                       "json.dump({'case': '00000', 'correct': True},\n"
+                       "          open(os.path.join(out, '00000.json'), 'w'))\n"
+                       "time.sleep(1.0)\n")
+        write_script(self.root, "scripts/bench_math500.py", keeps_going)
+        args = self.args(verify_after=0.5)
+        with mock.patch.object(run_battery, "POLL_SECONDS", 0.05):
+            block = run_battery.run_leg(self.planned(), args, self.out, str(self.root), "m")
+        self.assertNotEqual(block["status"], "stalled", "progress must disarm the check")
+        self.assertEqual(block["exit_code"], 0)
+
+    def test_the_lcb_leg_is_exempt_from_the_progress_check(self):
+        lcb = self.planned(leg_id="lcb")
+        small = self.planned(leg_id="math500")
+        args = self.args(verify_after=900)
+        self.assertIsNone(run_battery._progress_watch(lcb, args, self.out))
+        self.assertIsNotNone(run_battery._progress_watch(small, args, self.out))
+        self.assertIsNone(run_battery._progress_watch(small, self.args(verify_after=0),
+                                                      self.out))
+
+    def test_stopping_a_leg_takes_its_children_with_it(self):
+        with_orphan = ("import os, subprocess, sys, time\n"
+                       "out_dir = sys.argv[sys.argv.index('--output-dir') + 1]\n"
+                       "os.makedirs(out_dir, exist_ok=True)\n"
+                       "child = subprocess.Popen(['sleep', '120'])\n"
+                       "open(os.path.join(out_dir, 'child.pid'), 'w').write(str(child.pid))\n"
+                       "time.sleep(120)\n")
+        write_script(self.root, "scripts/bench_math500.py", with_orphan)
+        block = run_battery.run_leg(self.planned(budget_s=1), self.args(),
+                                    self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "timeout")
+        child_pid = int((self.out / "legs" / "child.pid").read_text())
+        deadline = time.time() + 3
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            if time.time() > deadline:
+                self.fail("the leg's child outlived it")
+            time.sleep(0.05)
+
+
+class StoppageTest(FakeRun):
+    """The edges of stopping a leg: stubborn children, dead groups, and the signal."""
+
+    @staticmethod
+    def _sleeping() -> subprocess.Popen:
+        # Its own session, or a killpg aimed at it takes the test runner's group down too.
+        return subprocess.Popen(["sleep", "120"], start_new_session=True)
+
+    def test_a_leg_that_ignores_sigterm_is_escalated_to_sigkill(self):
+        stubborn = ("import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "time.sleep(120)\n")
+        write_script(self.root, "scripts/bench_math500.py", stubborn)
+        with mock.patch.object(run_battery, "STOP_GRACE_S", 0.5):
+            block = run_battery.run_leg(self.planned(budget_s=1), self.args(),
+                                        self.out, str(self.root), "m")
+        self.assertEqual(block["status"], "timeout")
+
+    def test_a_group_that_is_already_gone_is_a_noop(self):
+        proc = self._sleeping()
+        self.addCleanup(lambda: proc.poll() is not None or os.killpg(os.getpgid(proc.pid),
+                                                                    signal.SIGKILL))
+        with mock.patch("os.killpg", side_effect=ProcessLookupError):
+            run_battery._stop(proc)
+        # No exception means the early return swallowed the race.
+        self.assertTrue(proc.poll() is None or proc.poll() == -9)
+
+    def test_the_signal_handler_takes_the_leg_with_the_orchestrator(self):
+        child = self._sleeping()
+        run_battery._register_child(child)
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                run_battery._stop_on_signal(signal.SIGTERM, None)
+            self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+        finally:
+            run_battery._register_child(None)
+        deadline = time.time() + 3
+        while True:
+            try:
+                os.kill(child.pid, 0)
+            except ProcessLookupError:
+                break
+            if time.time() > deadline:
+                self.fail("the signal handler left the leg running")
+            time.sleep(0.05)
+
+    def test_the_progress_window_verdicts(self):
+        watch = run_battery.ProgressWatch(lambda: 5, 10.0)
+        self.assertEqual(run_battery._watch_verdict(watch, 0, 9.0), (False, ""))
+        self.assertEqual(run_battery._watch_verdict(watch, 0, 10.0), (True, ""))
+        still = run_battery.ProgressWatch(lambda: 0, 10.0)
+        disarm, stall = run_battery._watch_verdict(still, 0, 10.0)
+        self.assertFalse(disarm)
+        self.assertIn("no case written", stall)
+        self.assertEqual(run_battery._watch_verdict(None, 0, 999), (False, ""))
+
+    def test_last_error_handles_a_log_without_a_traceback(self):
+        log = self.out / "logs" / "x.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("all quiet\n")
+        self.assertEqual(run_battery.last_error(log), "")
+
+    def test_last_error_handles_a_missing_log(self):
+        self.assertEqual(run_battery.last_error(self.out / "logs" / "nope.log"), "")
+
+
+class FailureReportTest(FakeRun):
+    """The failure line goes to stderr, with the exception, and only when it is dirty."""
+
+    def test_a_dirty_leg_prints_its_status_and_exception(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            run_battery._report_failure(
+                "math500", {"status": "stalled", "reason": "no case written",
+                            "last_error": "ZeroDivisionError"})
+        out = buf.getvalue()
+        self.assertIn("stalled", out)
+        self.assertIn("ZeroDivisionError", out)
+
+    def test_a_clean_leg_is_silent(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            run_battery._report_failure("math500", {"status": "pass", "reason": ""})
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_failed_exit_returns_one_only_when_a_leg_is_dirty(self):
+        self.assertEqual(run_battery._failed_exit({"a": {"status": "pass"}}), 0)
+        self.assertEqual(run_battery._failed_exit({"a": {"status": "timeout"}}), 1)
 
 
 class RunAllTest(FakeRun):

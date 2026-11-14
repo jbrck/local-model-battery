@@ -27,11 +27,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -50,6 +51,27 @@ STANDARD_FILE = "standard.toml"
 LEGS_DIR = "legs"
 LOG_DIR = "logs"
 PENDING_STATUS = "not run"
+STALL_STATUS = "stalled"
+
+# How often the orchestrator looks at a running leg, and how long a leg may go without
+# checkpointing a single case before it is taken down. A leg that has answered nothing after
+# fifteen minutes is not slow, it is broken, and the whole point of a battery is that it
+# finds that out before it has burned the night.
+POLL_SECONDS = 5.0
+VERIFY_AFTER_S = 900.0
+STOP_GRACE_S = 10.0
+# Legs exempt from the progress check. The check stops a leg that has checkpointed no case
+# inside the window, and for most legs that is right: a half hour of silence is a broken
+# leg. Not for LCB. It generates one answer at a time at up to 114k context and can sit on
+# a single case for half an hour with nothing written, so the check would kill it healthy.
+VERIFY_EXEMPT = frozenset({"lcb"})
+
+
+class ProgressWatch(NamedTuple):
+    """A leg's progress check: how many cases it has written, and when to look."""
+
+    count: Callable[[], int]
+    after_s: float
 
 
 def start_timer() -> float:
@@ -67,7 +89,7 @@ def elapsed(start: float) -> str:
     return f"{minutes}m {seconds}s"
 
 
-FAILED_STATUSES = ("fail", "timeout")
+FAILED_STATUSES = ("fail", "timeout", "stalled")
 
 # The values a leg's --thinking flag accepts. The standard also records n/a, for a leg
 # whose generation takes no thinking switch at all (the writing leg), so that value must
@@ -102,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="continue a run directory: legs that passed are left alone")
     parser.add_argument("--no-budget-kill", action="store_true",
                         help="do not stop a leg that overruns its planned budget")
+    parser.add_argument("--verify-after", type=float, default=VERIFY_AFTER_S,
+                        help="stop a leg that has checkpointed no case within this many "
+                             "seconds (default 900; 0 disables the check)")
     parser.add_argument("--strict", action="store_true",
                         help="exit non-zero when a leg is missing or was never planned")
     parser.add_argument("--detach", action="store_true",
@@ -189,31 +214,149 @@ def read_block(out_dir: Path, leg_id: str) -> dict | None:
         return None
 
 
-def _run_command(command: list[str], log, limit: int | None) -> tuple[int, bool]:
-    """Run one leg under its budget; returns (exit code, stopped at the budget)."""
+def _run_command(command: list[str], log, limit: int | None,
+                 watch: ProgressWatch | None = None) -> tuple[int, bool, str]:
+    """Run one leg under its budget and its progress check.
+
+    Returns (exit code, stopped at the budget, stall reason). The leg runs in its own
+    process group so stopping it stops whatever it started: a killed orchestrator must not
+    leave a leg behind holding the GPU.
+    """
+    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    _register_child(process)
+    started = time.monotonic()
+    cases_at_start = watch.count() if watch else 0
     try:
-        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
-                                check=False, timeout=limit)
-        return result.returncode, False
-    except subprocess.TimeoutExpired:
-        return -1, True
+        while True:
+            code = process.poll()
+            if code is not None:
+                return code, False, ""
+            waited = time.monotonic() - started
+            disarm, stall = _watch_verdict(watch, cases_at_start, waited)
+            if disarm:
+                watch = None
+            if stall:
+                _stop(process)
+                return -2, False, stall
+            if limit is not None and waited >= limit:
+                _stop(process)
+                return -1, True, ""
+            time.sleep(POLL_SECONDS)
+    finally:
+        _register_child(None)
 
 
-def _final_block(planned, out_dir: Path, log_path: Path, code: int, killed: bool) -> dict:
+def _watch_verdict(watch: ProgressWatch | None, cases_at_start: int,
+                   waited: float) -> tuple[bool, str]:
+    """What the progress check says after the window closed: either progress (disarm the
+    watch), a stall reason to enforce, or nothing while the window is still open."""
+    if watch is None or waited < watch.after_s:
+        return False, ""
+    if watch.count() > cases_at_start:
+        return True, ""
+    return False, f"no case written in the first {watch.after_s / 60:.0f} min"
+
+
+def _stop(process) -> None:
+    """Stop the leg and everything it started, so nothing is left holding the GPU."""
+    if process.poll() is not None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(process.pid), sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            process.wait(timeout=STOP_GRACE_S)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+_current_child: subprocess.Popen | None = None
+
+
+def _register_child(process: subprocess.Popen | None) -> None:
+    """Remember the running leg, so a signal to the orchestrator can take it down too."""
+    global _current_child
+    _current_child = process
+
+
+def _stop_on_signal(signum, _frame) -> None:
+    """An interrupted orchestrator leaves no leg running: it stops the one it started."""
+    if _current_child is not None:
+        _stop(_current_child)
+    raise SystemExit(128 + signum)
+
+
+def case_count(out_dir: Path, leg_id: str) -> int:
+    """How many cases the leg has checkpointed so far for this run."""
+    cases = out_dir / LEGS_DIR / "cases" / leg_id
+    if not cases.is_dir():
+        return 0
+    return sum(1 for _ in cases.glob("*.json"))
+
+
+def last_error(log_path: Path) -> str:
+    """The exception line a leg died on, if it died on one. A leg that fails silently is
+    the thing this whole runner exists to avoid."""
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return ""
+    if "Traceback (most recent call last)" not in text:
+        return ""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def _record(out_dir: Path, block: dict, wrote_own: bool) -> None:
+    """Put a failed leg on disk. A leg that dies must not read as 'not run' next morning.
+
+    The leg's own block wins when it wrote one and finished: it holds the counters. This
+    writes only when the leg wrote nothing, or when the orchestrator stopped it and the
+    status it recorded is the one an operator needs to see.
+    """
+    if wrote_own and block.get("status") not in (STALL_STATUS, "timeout"):
+        return
+    path = out_dir / LEGS_DIR / f"{block['leg']}{RESULT_SUFFIX}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(block, indent=2) + "\n")
+
+
+def _final_block(planned, out_dir: Path, log_path: Path, code: int, killed: bool,
+                 stall: str = "") -> dict:
     """The leg's own block if it wrote one, otherwise an honest failure block."""
     block = read_block(out_dir, planned.leg.id)
+    wrote_own = block is not None
     if block is None:
-        block = {"leg": planned.leg.id, "status": "timeout" if killed else "fail",
-                 "reason": (f"stopped at the planned budget of {planned.budget_s / 3600:.1f}h"
-                            if killed else f"exit {code}, no result block in {log_path}")}
+        status = "timeout" if killed else (STALL_STATUS if stall else "fail")
+        reason = (f"stopped at the planned budget of {planned.budget_s / 3600:.1f}h" if killed
+                  else stall or f"exit {code}, no result block in {log_path}")
+        block = {"leg": planned.leg.id, "status": status, "reason": reason}
     elif killed:
         block["status"] = "timeout"
         block["reason"] = (f"stopped at the planned budget of {planned.budget_s / 3600:.1f}h; "
                            f"the numbers here are the ones it had written")
     block["exit_code"] = code
     block["log"] = str(log_path)
+    error = last_error(log_path)
+    if error:
+        block["last_error"] = error
     block["_live"] = True
+    _record(out_dir, block, wrote_own)
     return block
+
+
+def _progress_watch(planned, args: argparse.Namespace, out_dir: Path) -> ProgressWatch | None:
+    """The progress check for a leg, if it has one. Exempt legs (VERIFY_EXEMPT, e.g. LCB)
+    only checkpoint on a finished generation and run long generations: for them silence is
+    health and the check would be a false alarm."""
+    after_s = float(getattr(args, "verify_after", VERIFY_AFTER_S) or 0)
+    if not after_s or planned.leg.id in VERIFY_EXEMPT:
+        return None
+    return ProgressWatch(lambda: case_count(out_dir, planned.leg.id), after_s)
 
 
 def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: str) -> dict:
@@ -223,14 +366,17 @@ def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: 
     log_path = log_dir / f"{planned.leg.id}.log"
     command = leg_command(planned, args, out_dir, root, model)
     limit = None if args.no_budget_kill else planned.budget_s or None
+    watch = _progress_watch(planned, args, out_dir)
     print(f"\n{'=' * 60}\n{planned.leg.id}: cap {planned.cap}, ctx {planned.ctx}, "
           f"thinking {planned.thinking}, budget {planned.budget_s / 3600:.1f}h\n{'=' * 60}",
           flush=True)
     with open(log_path, "w") as log:
         log.write(" ".join(command) + "\n\n")
         log.flush()
-        code, killed = _run_command(command, log, limit)
-    return _final_block(planned, out_dir, log_path, code, killed)
+        code, killed, stall = _run_command(command, log, limit, watch)
+    if stall:
+        print(f"\n{planned.leg.id}: stopped — {stall}", file=sys.stderr, flush=True)
+    return _final_block(planned, out_dir, log_path, code, killed, stall)
 
 
 def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -> dict:
@@ -245,8 +391,10 @@ def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -
             results[leg_id] = read_block(out_dir, leg_id)
             continue
         results[leg_id] = run_leg(planned, args, out_dir, root, plan.model)
+        block = results[leg_id]
+        _report_failure(leg_id, block)
         # The gate leg exists to stop the run before it burns hours.
-        if planned.leg.gate and results[leg_id].get("status") in FAILED_STATUSES:
+        if planned.leg.gate and block.get("status") in FAILED_STATUSES:
             print(f"\n{leg_id} is the gate and it failed: stopping here", file=sys.stderr)
             break
     return results
@@ -337,6 +485,16 @@ def detach_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_failure(leg_id: str, block: dict) -> None:
+    """Shout about a dirty leg where the run's own output can be seen."""
+    if block.get("status") not in FAILED_STATUSES:
+        return
+    print(f"\n{leg_id}: {block.get('status')} — {block.get('reason', '')}",
+          file=sys.stderr, flush=True)
+    if block.get("last_error"):
+        print(f"{leg_id}: {block['last_error']}", file=sys.stderr, flush=True)
+
+
 def status_report(args: argparse.Namespace) -> int:
     """What the run directory says, plainly: the pid's liveness and each leg's state."""
     if not args.out:
@@ -351,12 +509,33 @@ def status_report(args: argparse.Namespace) -> int:
     legs = detach.leg_states(out_dir)
     if not legs:
         print(f"no {detach.PLAN_FILE} in {out_dir}: no planned legs to report")
+        return 0
+    for line in _status_lines(legs):
+        print(line)
+    return _failed_exit(legs)
+
+
+def _failed_exit(legs: dict) -> int:
+    """A run with a dirty leg is not a finished run: status says so and exits 1."""
+    failed = [leg_id for leg_id, block in legs.items()
+              if block["status"] in FAILED_STATUSES]
+    if not failed:
+        return 0
+    print(f"\n{len(failed)} leg(s) did not finish clean: {', '.join(sorted(failed))}")
+    return 1
+
+
+def _status_lines(legs: dict) -> list[str]:
+    """One readable line per planned leg, with whatever the failure left behind."""
+    lines = []
     for leg_id, block in legs.items():
         line = f"  {leg_id:16s} {block['status']}"
         if block["reason"]:
             line += f"  ({block['reason']})"
-        print(line)
-    return 0
+        lines.append(line)
+        if block.get("last_error"):
+            lines.append(f"      error: {block['last_error']}")
+    return lines
 
 
 def _early_exit(args: argparse.Namespace) -> int | None:
@@ -376,6 +555,8 @@ def _run_for_real(plan: RunPlan, args: argparse.Namespace, probes, timer: float,
         return 2
     out_dir = Path(args.out).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _stop_on_signal)
     host, server, pilot = probes
     checks = gate(plan, args, probes)
     misses = preflight.blocked(checks)

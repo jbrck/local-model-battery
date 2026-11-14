@@ -167,7 +167,9 @@ def leg_states(out_dir: Path) -> dict[str, dict]:
         leg_id = item["leg"]
         block = read_block(out_dir, leg_id)
         if block:
-            states[leg_id] = {"status": block.get("status", NOT_RUN), "reason": ""}
+            states[leg_id] = {"status": block.get("status", NOT_RUN),
+                              "reason": block.get("reason", ""),
+                              "last_error": block.get("last_error", "")}
         else:
-            states[leg_id] = {"status": NOT_RUN, "reason": item["reason"]}
+            states[leg_id] = {"status": NOT_RUN, "reason": item["reason"], "last_error": ""}
     return states
