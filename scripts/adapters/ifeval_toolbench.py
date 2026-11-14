@@ -97,10 +97,20 @@ def parse_toolbench(path: str) -> tuple[Tally, dict]:
 
 
 def find_report(output_dir: str, started: float) -> str | None:
-    """The newest report this run wrote under runs/YYYY/MM."""
-    reports = [path for path in (Path(output_dir) / "runs").glob("*/*/*.md")
-               if path.stat().st_mtime >= started]
-    return str(max(reports, key=lambda path: path.stat().st_mtime)) if reports else None
+    """The newest report this run wrote, under runs/ or the output dir itself.
+
+    Tool-eval-bench nests reports under <output-dir>/runs/YYYY/MM, but it resolves a
+    relative --output-dir against its own anchor, which historically doubled the tree and
+    hid the report from a fixed-depth glob. An absolute output dir fixes the layout; this
+    glob covers both candidate roots anyway, so a completed run never reads as a failure
+    because the report sat somewhere the parser did not expect.
+    """
+    root = Path(output_dir)
+    report_files = [path for path in root.glob("**/*.md")
+                    if path.stat().st_mtime >= started]
+    if not report_files:
+        return None
+    return str(max(report_files, key=lambda path: path.stat().st_mtime))
 
 
 def parse_report(text: str) -> tuple[Tally, dict]:
@@ -124,13 +134,21 @@ def parse_report(text: str) -> tuple[Tally, dict]:
 
 
 def run_leg(leg: str, args: LegArgs, cli: str) -> dict:
-    """Run the CLI for one leg and write the result block."""
-    json_path = os.path.join(args.output_dir, f"tool-eval-{leg}.json")
-    os.makedirs(args.output_dir, exist_ok=True)
+    """Run the CLI for one leg and write the result block.
+
+    The CLI resolves relative --output-dir and --json-file against ITS working directory,
+    which is this script's own legs directory, not the repo root. Paths stay relative for
+    one layer and the report lands deeper than the parser looks: that is exactly how a run
+    completes and still reads as failed. Everything the CLI touches must be absolute.
+    """
+    output_dir = os.path.abspath(args.output_dir)
+    json_path = os.path.join(output_dir, f"tool-eval-{leg}.json")
+    os.makedirs(output_dir, exist_ok=True)
     command = build_command(leg, args, cli, json_path)
+    command[command.index("--output-dir") + 1] = output_dir
     print(" ".join(command), flush=True)
     started = time.time()
-    code, tail = run_cli(command, args.output_dir)
+    code, tail = run_cli(command, output_dir)
     try:
         if leg == "toolbench":
             tally, extra = parse_toolbench(json_path)

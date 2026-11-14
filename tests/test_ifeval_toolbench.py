@@ -3,10 +3,12 @@ import json
 import os
 import tempfile
 import textwrap
+import time
 import unittest
+from unittest import mock
 
 from scripts.adapters import ifeval_toolbench as adapter
-from scripts.lib.harness import LegArgs, result_path
+from scripts.lib.harness import LegArgs, Tally, result_path
 
 REPORT = textwrap.dedent("""
     # IFEval Benchmark - fake
@@ -71,6 +73,42 @@ class CommandTest(unittest.TestCase):
         self.assertIn("--no-think", command)
         self.assertEqual(command[command.index("--seed") + 1], "7")
         self.assertEqual(command[command.index("--ifeval-limit") + 1], "5")
+
+
+class RunLegPathTest(unittest.TestCase):
+    """A relative output dir is the historical footgun: the CLI resolves it against its own
+    working directory and the report lands where the parser never looks."""
+
+    def test_the_cli_gets_absolute_paths_even_for_a_relative_output_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("legs")
+                args = args_for("legs")
+                with mock.patch.object(adapter, "run_cli", return_value=(0, "")) as run:
+                    with mock.patch.object(adapter, "parse_toolbench",
+                                           return_value=(Tally(), {})) as parse:
+                        adapter.run_leg("toolbench", args, "cli")
+                command = run.call_args.args[0]
+                output_dir = command[command.index("--output-dir") + 1]
+                json_path = command[command.index("--json-file") + 1]
+                self.assertTrue(os.path.isabs(output_dir))
+                self.assertTrue(os.path.isabs(json_path))
+                self.assertTrue(json_path.startswith(output_dir + os.sep))
+                parse.assert_called_once()
+            finally:
+                os.chdir(previous)
+
+    def test_find_report_is_depth_tolerant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deep = os.path.join(tmp, "runs", "a", "b", "c", "2026", "11")
+            os.makedirs(deep)
+            path = os.path.join(deep, "report.md")
+            with open(path, "w") as handle:
+                handle.write("x")
+            found = adapter.find_report(tmp, time.time() - 10)
+            self.assertEqual(os.path.realpath(found), os.path.realpath(path))
 
 
 class ToolbenchParseTest(unittest.TestCase):
