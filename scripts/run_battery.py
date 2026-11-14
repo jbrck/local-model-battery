@@ -60,18 +60,36 @@ STALL_STATUS = "stalled"
 POLL_SECONDS = 5.0
 VERIFY_AFTER_S = 900.0
 STOP_GRACE_S = 10.0
-# Legs exempt from the progress check. The check stops a leg that has checkpointed no case
+# Legs exempt from the progress check. The check stops a leg that has written nothing
 # inside the window, and for most legs that is right: a half hour of silence is a broken
-# leg. Not for LCB. It generates one answer at a time at up to 114k context and can sit on
-# a single case for half an hour with nothing written, so the check would kill it healthy.
-VERIFY_EXEMPT = frozenset({"lcb"})
+# leg. Not for these. LCB generates one answer at a time at up to 114k context and can
+# sit on a single case for half an hour with nothing written. The tool-eval
+# harnesses (ifeval, ifbench) only checkpoint at leg end, and toolbench follows the same
+# harness. hermesagent20 runs a small number of long agent tasks that print little in
+# between. For all of them silence is health; their budgets are the runaway bound.
+VERIFY_EXEMPT = frozenset({"lcb", "ifeval", "ifbench", "toolbench", "hermesagent20"})
 
 
 class ProgressWatch(NamedTuple):
-    """A leg's progress check: how many cases it has written, and when to look."""
+    """A leg's progress check: what it has written, and when to look.
+
+    Progress means either a new case file or a growing leg log. The second half matters
+    for legs that log per task but only checkpoint at the end: a quiet log is a stuck
+    leg, but a growing one is alive even when no case has landed yet.
+    """
 
     count: Callable[[], int]
     after_s: float
+    log: Path
+    start_size: int
+
+    def has_progress(self, start_count: int) -> bool:
+        if self.count() > start_count:
+            return True
+        try:
+            return self.log.stat().st_size > self.start_size
+        except OSError:
+            return False
 
 
 def start_timer() -> float:
@@ -253,7 +271,7 @@ def _watch_verdict(watch: ProgressWatch | None, cases_at_start: int,
     watch), a stall reason to enforce, or nothing while the window is still open."""
     if watch is None or waited < watch.after_s:
         return False, ""
-    if watch.count() > cases_at_start:
+    if watch.has_progress(cases_at_start):
         return True, ""
     return False, f"no case written in the first {watch.after_s / 60:.0f} min"
 
@@ -349,14 +367,17 @@ def _final_block(planned, out_dir: Path, log_path: Path, code: int, killed: bool
     return block
 
 
-def _progress_watch(planned, args: argparse.Namespace, out_dir: Path) -> ProgressWatch | None:
-    """The progress check for a leg, if it has one. Exempt legs (VERIFY_EXEMPT, e.g. LCB)
-    only checkpoint on a finished generation and run long generations: for them silence is
-    health and the check would be a false alarm."""
+def _progress_watch(planned, args: argparse.Namespace, out_dir: Path,
+                    log_path: Path) -> ProgressWatch | None:
+    """The progress check for a leg, if it has one. Exempt legs (VERIFY_EXEMPT, e.g. LCB
+    and the tool-eval harnesses) only checkpoint on a finished generation or run long
+    silent generations: for them silence is health and the check would be a false alarm."""
     after_s = float(getattr(args, "verify_after", VERIFY_AFTER_S) or 0)
     if not after_s or planned.leg.id in VERIFY_EXEMPT:
         return None
-    return ProgressWatch(lambda: case_count(out_dir, planned.leg.id), after_s)
+    start_size = log_path.stat().st_size if log_path.exists() else 0
+    return ProgressWatch(lambda: case_count(out_dir, planned.leg.id), after_s,
+                         log_path, start_size)
 
 
 def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: str) -> dict:
@@ -366,13 +387,13 @@ def run_leg(planned, args: argparse.Namespace, out_dir: Path, root: str, model: 
     log_path = log_dir / f"{planned.leg.id}.log"
     command = leg_command(planned, args, out_dir, root, model)
     limit = None if args.no_budget_kill else planned.budget_s or None
-    watch = _progress_watch(planned, args, out_dir)
     print(f"\n{'=' * 60}\n{planned.leg.id}: cap {planned.cap}, ctx {planned.ctx}, "
           f"thinking {planned.thinking}, budget {planned.budget_s / 3600:.1f}h\n{'=' * 60}",
           flush=True)
     with open(log_path, "w") as log:
         log.write(" ".join(command) + "\n\n")
         log.flush()
+        watch = _progress_watch(planned, args, out_dir, log_path)
         code, killed, stall = _run_command(command, log, limit, watch)
     if stall:
         print(f"\n{planned.leg.id}: stopped — {stall}", file=sys.stderr, flush=True)

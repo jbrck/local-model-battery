@@ -307,13 +307,32 @@ class RunLegSafetyTest(FakeRun):
         self.assertEqual(block["exit_code"], 0)
 
     def test_the_lcb_leg_is_exempt_from_the_progress_check(self):
+        log = self.out / "logs" / "x.log"
         lcb = self.planned(leg_id="lcb")
         small = self.planned(leg_id="math500")
         args = self.args(verify_after=900)
-        self.assertIsNone(run_battery._progress_watch(lcb, args, self.out))
-        self.assertIsNotNone(run_battery._progress_watch(small, args, self.out))
+        self.assertIsNone(run_battery._progress_watch(lcb, args, self.out, log))
+        self.assertIsNotNone(run_battery._progress_watch(small, args, self.out, log))
         self.assertIsNone(run_battery._progress_watch(small, self.args(verify_after=0),
-                                                      self.out))
+                                                      self.out, log))
+
+    def test_end_checkpoint_legs_are_exempt_but_talky_legs_are_not(self):
+        log = self.out / "logs" / "x.log"
+        args = self.args(verify_after=900)
+        for leg_id in ("ifeval", "ifbench", "toolbench", "hermesagent20"):
+            self.assertIsNone(run_battery._progress_watch(
+                self.planned(leg_id=leg_id), args, self.out, log), leg_id)
+        self.assertIsNotNone(run_battery._progress_watch(
+            self.planned(leg_id="writing"), args, self.out, log))
+
+    def test_a_leg_that_only_talks_stays_alive(self):
+        chatty = "import time\nprint('hello, world', flush=True)\ntime.sleep(2.0)\n"
+        write_script(self.root, "scripts/bench_math500.py", chatty)
+        with mock.patch.object(run_battery, "POLL_SECONDS", 0.05):
+            block = run_battery.run_leg(self.planned(), self.args(verify_after=0.5),
+                                        self.out, str(self.root), "m")
+        self.assertNotEqual(block["status"], "stalled", "log growth must disarm the check")
+        self.assertEqual(block["exit_code"], 0)
 
     def test_stopping_a_leg_takes_its_children_with_it(self):
         with_orphan = ("import os, subprocess, sys, time\n"
@@ -384,14 +403,26 @@ class StoppageTest(FakeRun):
             time.sleep(0.05)
 
     def test_the_progress_window_verdicts(self):
-        watch = run_battery.ProgressWatch(lambda: 5, 10.0)
+        log = self.out / "logs" / "x.log"
+        watch = run_battery.ProgressWatch(lambda: 5, 10.0, log, 1)
         self.assertEqual(run_battery._watch_verdict(watch, 0, 9.0), (False, ""))
         self.assertEqual(run_battery._watch_verdict(watch, 0, 10.0), (True, ""))
-        still = run_battery.ProgressWatch(lambda: 0, 10.0)
+        still = run_battery.ProgressWatch(lambda: 0, 10.0, log, 1)
         disarm, stall = run_battery._watch_verdict(still, 0, 10.0)
         self.assertFalse(disarm)
         self.assertIn("no case written", stall)
         self.assertEqual(run_battery._watch_verdict(None, 0, 999), (False, ""))
+
+    def test_a_growing_log_counts_as_progress_and_a_missing_one_does_not(self):
+        log = self.out / "logs" / "grow.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("start\n")
+        grew = run_battery.ProgressWatch(lambda: 0, 10.0, log, log.stat().st_size)
+        log.write_text("start\nmore\n")
+        self.assertTrue(grew.has_progress(0))
+        quiet = run_battery.ProgressWatch(lambda: 0, 10.0, self.out / "logs" / "absent.log",
+                                          0)
+        self.assertFalse(quiet.has_progress(0))
 
     def test_last_error_handles_a_log_without_a_traceback(self):
         log = self.out / "logs" / "x.log"
