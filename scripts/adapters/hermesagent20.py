@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -14,7 +15,19 @@ from scripts.lib.harness import (  # noqa: E402
 
 LEG_ID = "hermesagent20"
 PACK_ID = "hermesagent-20"
-RUNNER = "/mnt/data/benchmark-venv/bin/benchlocal-cli"
+
+
+def runner() -> str:
+    """Where benchlocal-cli lives on THIS host.
+
+    The leg used to hardcode one machine's venv path, so a run on any other box died
+    with FileNotFoundError before a single scenario ran. Resolve at call time: explicit
+    BENCHLOCAL_BIN, then PATH, then the bench-venv install this fleet uses.
+    """
+    return (os.environ.get("BENCHLOCAL_BIN") or shutil.which("benchlocal-cli")
+            or "/mnt/models/bench/bench-venv/bin/benchlocal-cli")
+
+
 SANDBOX_FLAG = "--enable-sandboxed-packs"
 TIMEOUT_MODES = frozenset({"timeout", "agent_runner_timeout"})
 INFRA_MODES = frozenset({"http_error", "server_error", "stall"})
@@ -32,7 +45,7 @@ def thinking_flag(mode: str) -> str:
 
 def build_command(args: LegArgs, save_json: str, resume: str | None) -> list[str]:
     command = [
-        RUNNER, "run",
+        runner(), "run",
         "--pack", PACK_ID,
         SANDBOX_FLAG,
         "--endpoint", args.endpoint,
