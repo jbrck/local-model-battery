@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.adapters import lcb, lcb_worker
+from scripts.adapters import lcb, lcb_score, lcb_worker
 from scripts.adapters.lcb_guard import FailureKind, Guard
 from tests.stub_json import JsonStub, completion
 
@@ -305,6 +305,46 @@ class WrongInterpreterTest(LegTest):
         self.assertEqual(block["status"], "not run")
         self.assertEqual(block["wrong_interpreter"], sys.executable)
         self.assertIn("datasets", block["reason"])
+
+
+class ScorerInterpreterTest(unittest.TestCase):
+    """Scoring must never spawn an interpreter that is not on this machine.
+
+    The leg shipped with one machine's absolute path as the scorer default, so on any
+    other box generation finished and the last step died with FileNotFoundError.
+    """
+
+    def test_a_present_interpreter_is_used(self):
+        self.assertEqual(lcb_score.interpreter(sys.executable), sys.executable)
+
+    def test_a_vanished_interpreter_degrades_to_this_one(self):
+        gone = "/nope/benchmark-venv/bin/python3"
+        self.assertFalse(os.path.exists(gone))
+        self.assertEqual(lcb_score.interpreter(gone), sys.executable)
+
+    def test_the_env_var_can_point_at_the_scorer(self):
+        with mock.patch.object(lcb_score.os.path, "exists", return_value=True):
+            with mock.patch.dict(os.environ, {"LCB_SCORER_PYTHON": "/env/py"}):
+                self.assertEqual(lcb_score.interpreter(""), "/env/py")
+
+    def test_the_score_step_never_spawns_a_missing_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = mock.Mock(output_dir=tmp, src=tmp, workers=1, exec_timeout=1,
+                             scorer_python="/nope/benchmark-venv/bin/python3")
+            problems = [{"question_id": "q1"}]
+            done = {"q1": {"code": "print(1)"}}
+            seen = {}
+
+            class Completed:
+                returncode = 1
+
+            def fake_run(argv, **kwargs):
+                seen["argv"] = argv
+                return Completed()
+
+            with mock.patch.object(lcb_score.subprocess, "run", side_effect=fake_run):
+                lcb_score.score(problems, done, args)
+            self.assertTrue(os.path.exists(seen["argv"][0]))
 
 
 if __name__ == "__main__":

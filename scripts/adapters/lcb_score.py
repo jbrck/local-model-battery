@@ -4,12 +4,26 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scripts.adapters.lcb import LcbArgs
 
 WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcb_worker.py")
+
+
+def interpreter(requested: str) -> str:
+    """The interpreter to score with: requested, then the env, then this one.
+
+    The default was one machine's absolute path, so scoring died with FileNotFoundError
+    after generation had already spent hours on the set. Scoring under whatever runs the
+    leg is a worse-configured but always-present fallback.
+    """
+    for candidate in (requested, os.environ.get("LCB_SCORER_PYTHON", "")):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return sys.executable
 
 
 def scorable_pairs(problems: list[dict],
@@ -40,7 +54,8 @@ def score(problems: list[dict], done: dict[str, dict],
                "workers": args.workers, "exec_timeout": args.exec_timeout}
     with open(input_path, "w") as handle:
         json.dump(payload, handle)
-    result = subprocess.run([args.scorer_python, WORKER_SCRIPT, input_path, output_path],
+    result = subprocess.run([interpreter(args.scorer_python), WORKER_SCRIPT, input_path,
+                             output_path],
                             cwd=args.src, env={**os.environ, "PYTHONPATH": args.src})
     if result.returncode != 0:
         return {}, f"scorer exited {result.returncode}"
