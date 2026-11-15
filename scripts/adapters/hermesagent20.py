@@ -43,12 +43,22 @@ def thinking_flag(mode: str) -> str:
     return "--no-thinking" if mode == "off" else "--enable-thinking"
 
 
+def model_endpoint(endpoint: str) -> str:
+    """Where the sandboxed packs should call the model.
+
+    Packs run in Docker and cannot reach an engine bound to the host's loopback. Set
+    HERMESAGENT20_ENDPOINT to a bridge-reachable address (scripts/tools/endpoint_bridge.py
+    forwards one) and the leg uses that; unset, the endpoint passes through untouched.
+    """
+    return os.environ.get("HERMESAGENT20_ENDPOINT") or endpoint
+
+
 def build_command(args: LegArgs, save_json: str, resume: str | None) -> list[str]:
     command = [
         runner(), "run",
         "--pack", PACK_ID,
         SANDBOX_FLAG,
-        "--endpoint", args.endpoint,
+        "--endpoint", model_endpoint(args.endpoint),
         "--model", args.model,
         "--api-key", args.api_key,
         "--max-tokens", str(args.cap),

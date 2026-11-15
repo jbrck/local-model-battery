@@ -36,3 +36,22 @@ class RunnerResolutionTest(unittest.TestCase):
             command = adapter.build_command(args, "/tmp/x-run.json", None)
         self.assertEqual(command[0], "/opt/x/benchlocal-cli")
         self.assertEqual(command[1], "run")
+
+
+class EndpointRoutingTest(unittest.TestCase):
+    """Sandboxed packs cannot see a loopback-bound engine; the bridge address is the route."""
+
+    def test_the_run_endpoint_passes_through_by_default(self):
+        with mock.patch.dict(os.environ, {"HERMESAGENT20_ENDPOINT": ""}):
+            self.assertEqual(adapter.model_endpoint("http://127.0.0.1:8124/v1"),
+                             "http://127.0.0.1:8124/v1")
+
+    def test_an_override_is_used_for_the_command_line(self):
+        args = LegArgs(model="m", endpoint="http://127.0.0.1:8124/v1", api_key="k",
+                       cap=8192, ctx=131072, thinking="on", temperature=0.0, seed=1,
+                       timeout_s=600)
+        with mock.patch.dict(os.environ,
+                             {"HERMESAGENT20_ENDPOINT": "http://172.17.0.1:8124/v1"}):
+            command = adapter.build_command(args, "/tmp/x-run.json", None)
+        self.assertEqual(command[command.index("--endpoint") + 1],
+                         "http://172.17.0.1:8124/v1")
