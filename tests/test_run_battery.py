@@ -207,6 +207,19 @@ class ReadBlockTest(FakeRun):
         self._write('{"leg": "math500", "status": "pass"}')
         self.assertTrue(run_battery.done(self.out, "math500"))
 
+    def test_a_partial_leg_is_done(self):
+        """A partial block is a score. Re-running it on every resume costs hours."""
+        (self.out / "legs").mkdir(parents=True, exist_ok=True)
+        (self.out / "legs" / "ifbench.result.json").write_text(
+            '{"leg": "ifbench", "status": "partial", "scored": 300}')
+        self.assertTrue(run_battery.done(self.out, "ifbench"))
+
+    def test_a_stopped_leg_is_not_done(self):
+        (self.out / "legs").mkdir(parents=True, exist_ok=True)
+        (self.out / "legs" / "lcb.result.json").write_text(
+            '{"leg": "lcb", "status": "stalled"}')
+        self.assertFalse(run_battery.done(self.out, "lcb"))
+
 
 class RunLegTest(FakeRun):
     def test_a_passing_leg_is_reported_from_its_own_block(self):

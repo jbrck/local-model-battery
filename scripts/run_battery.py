@@ -108,6 +108,9 @@ def elapsed(start: float) -> str:
 
 
 FAILED_STATUSES = ("fail", "timeout", "stalled")
+# A partial block is a score: the set ran, some cases hit the cap. Resume must keep it,
+# or every resume re-runs the leg from zero.
+SETTLED_STATUSES = ("pass", "partial")
 
 # The values a leg's --thinking flag accepts. The standard also records n/a, for a leg
 # whose generation takes no thinking switch at all (the writing leg), so that value must
@@ -408,7 +411,7 @@ def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -
         if missing_reason(planned, root):
             continue
         if args.resume and done(out_dir, leg_id):
-            print(f"\n{leg_id}: already passed in this directory, left alone")
+            print(f"\n{leg_id}: already finished in this directory, left alone")
             results[leg_id] = read_block(out_dir, leg_id)
             continue
         results[leg_id] = run_leg(planned, args, out_dir, root, plan.model)
@@ -423,7 +426,7 @@ def run_all(plan: RunPlan, args: argparse.Namespace, out_dir: Path, root: str) -
 
 def done(out_dir: Path, leg_id: str) -> bool:
     block = read_block(out_dir, leg_id)
-    return bool(block) and block.get("status") == "pass"
+    return bool(block) and block.get("status") in SETTLED_STATUSES
 
 
 def _summary_row(leg_id: str, block: dict) -> str:
