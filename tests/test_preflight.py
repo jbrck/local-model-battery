@@ -41,7 +41,7 @@ from tests.fixtures import (  # noqa: E402
 )
 
 # A card that is already busy and a host short on RAM: 22 GB of 24 GB taken, 10 GB free to spill
-OCCUPIED = replace(RICH, gpus=(Gpu(0, "RTX 3090", 24576, 22528, 350.0),),
+OCCUPIED = replace(RICH, gpus=(Gpu(0, "RTX 4080", 24576, 22528, 350.0),),
                    ram_available_gb=10.0)
 # 28 GB of weights on a 24 GB card: the tier that spills weights into RAM.
 SPILL = {**FITS, "weights_gb": 28.0}
@@ -142,11 +142,11 @@ class HostCheckTest(unittest.TestCase):
 
     def test_the_vram_credited_to_the_run_is_spelled_out(self):
         """The operator should see that the tier rests on crediting the loaded model to the run."""
-        host = replace(RICH, gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+        host = replace(RICH, gpus=(Gpu(0, "RTX 4080", 24576, 19670, 350.0),),
                        compute_apps=({"pid": "1748", "used_memory_mb": 19414.0},))
         shape = ModelShape(arch="qwen35", n_layers=17, n_kv_heads=4, head_dim=256,
                            kv_elements_per_token=4352, weights_bytes=int(4.25 * 1024 ** 3),
-                           source="gguf", path="/mnt/models/swift/q4.gguf")
+                           source="gguf", path="/models/swift/q4.gguf")
         checks = check_host(plan(FITS, host=host, shape=shape, serving_pid=1748), host)
         credit = named(checks, "host:credit")
         self.assertFalse(credit.blocks)

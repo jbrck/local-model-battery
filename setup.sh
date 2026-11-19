@@ -43,6 +43,26 @@ echo "==> Running tests..."
 python3 -m unittest discover -s tests -t . -q
 
 echo ""
+echo "==> Agent setup"
+echo "This repo ships an agent-facing run procedure at skill/SKILL.md"
+echo "(frontmatter name: local-battery-setup). An agent driving this battery"
+echo "should read that file before planning or starting a run."
+if [ -d "$HOME/.hermes/skills" ]; then
+    echo ""
+    echo "Detected a Hermes skills directory at \$HOME/.hermes/skills. Install or"
+    echo "refresh the skill there with:"
+    echo "  mkdir -p \"\$HOME/.hermes/skills/local-battery-setup\""
+    echo "  cp skill/SKILL.md \"\$HOME/.hermes/skills/local-battery-setup/SKILL.md\""
+    echo "(this will not run automatically — a live copy there may already carry"
+    echo "local additions worth keeping; diff before overwriting)"
+else
+    echo ""
+    echo "No Hermes skills directory found at \$HOME/.hermes/skills. If your agent"
+    echo "uses a different skills/procedures directory, copy skill/SKILL.md there,"
+    echo "or point the agent at this path directly."
+fi
+
+echo ""
 echo "==> Setup complete."
 echo ""
 echo "Next steps:"

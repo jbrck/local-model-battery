@@ -533,7 +533,7 @@ class ReportTest(FakeRun):
         self.assertEqual(1, run_battery.verdict(plan, results, strict=True))
 
     def test_skips_are_listed_as_skipped_legs(self):
-        # The pair of 3080s has nothing installed, so the adapter legs cannot run there.
+        # The pair of cards has nothing installed, so the adapter legs cannot run there.
         plan = fixtures.plan(fixtures.FITS, host=fixtures.PAIR, selected=("toolbench",))
         block = run_battery._skipped_blocks(plan, str(self.root))
         self.assertTrue(plan.skips, "this host should have skipped toolbench")

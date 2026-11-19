@@ -1,7 +1,7 @@
 # implementation-notes.md
 
-Running notes for the v2 portable battery rebuild. Plan of record:
-`/mnt/data/agents/hermes/workspace/.hermes/plans/2026-11-12_120000-local-model-battery-v2-portable.md`
+Running notes for the v2 portable battery rebuild. Plan of record kept with the authoring
+agent's own planning files (not part of this repo).
 
 Sections below follow AGENTS.md §11: Design Decisions, Deviations, Tradeoffs, Open Questions.
 Open Questions need a human answer before the rebuild is final.
@@ -19,7 +19,7 @@ Item counts and budget floors live in `standard.toml` only; `legs.toml` does not
 them, and the loader joins them by leg id. A comparability key on a leg must map to a
 `stamp_key` on some variable, or the catalog check fails.
 Reason: one frozen number per leg. Restating counts in two files invites the drift that
-already happened between the 3080 and 3090 result sets.
+already happened between two different hosts' result sets.
 
 **[scripts/lib/config.py — 2026-11-12]**
 Category: Design Decision
@@ -105,17 +105,16 @@ to the parts that are identical under every answer.
 
 **[Legs 6-13 — 2026-11-12]**
 Category: Open Question
-Nine legs are cataloged but their scripts are `port_pending`: they exist on the reference box
-as `/mnt/data/agents/hermes/workspace/{bench_full,bench_gpqa,bench_mmlu,bench_ifbench,bench_lcb,refusal_bench,reasoning_bench,instr_follow2}.py`
-and have not been ported here. Every one of them hardcodes `/mnt/data/benchmark-results` as
-its default output directory and several hardcode `/mnt/data` data paths, which is the main
-portability blocker. Porting them is the next chunk of work and depends on answer 1.
+Nine legs are cataloged but their scripts are `port_pending`: they exist on the reference
+machine as a set of standalone benchmark scripts and have not been ported here. Every one of
+them hardcodes a benchmark-results directory as its default output and several hardcode
+absolute data paths specific to that machine, which is the main portability blocker. Porting
+them is the next chunk of work and depends on answer 1.
 
-**[Reference box — 2026-11-12]**
+**[Reference machine — 2026-11-12]**
 Category: Open Question
-Nothing on the reference box was touched. Its harness at `/mnt/models/bench/arete-harness`
-still runs the v1 standard. Migration is gated on answer 3 and on a dry run comparing output
-against existing reference rows.
+Nothing on the reference machine was touched. Its harness there still runs the v1 standard.
+Migration is gated on answer 3 and on a dry run comparing output against existing reference rows.
 
 ## Integration state (2026-11-12)
 
@@ -174,8 +173,8 @@ The LCB leg could not run under the orchestrator at all. `lcb.load_helpers` impo
 `lcb_runner` from the checkout named by `--src`, and that package needs `datasets`, which the
 repo's own venv does not carry. `leg_command` launched every leg with `sys.executable`, so the
 leg raised `ModuleNotFoundError` before the first request. The legacy runs never saw this: they
-prepended `/mnt/data/benchmark-venv/bin` to `PATH`. A `# pragma: no cover` sat on exactly that
-import, so the gate had no opinion about it.
+prepended a benchmark venv's `bin` directory to `PATH`. A `# pragma: no cover` sat on exactly
+that import, so the gate had no opinion about it.
 
 A leg entry can now declare `interpreter`. `run_battery.leg_command` runs the leg under it and
 falls back to `sys.executable`. `legs.validate_legs` rejects a relative interpreter, because the
@@ -246,13 +245,14 @@ it is no longer the difference between a green run and a red one.
 
 ## The interpreter path pointed at a python that could not run the leg (2026-11-12)
 
-The entry above put an absolute path on the LCB leg: `/mnt/data/benchmark-venv/bin/python3`. Two
-things were wrong with it. Only the second one showed up in a test.
+The entry above put a machine-specific absolute path on the LCB leg (a benchmark venv's
+`python3`, baked in verbatim). Two things were wrong with it. Only the second one showed up
+in a test.
 
-That path is a symlink to `/usr/bin/python3`, and that interpreter cannot import `datasets` either.
-So the fix in the entry above moved the failure instead of removing it. The catalog's one
-machine-local path named an interpreter that would have failed this leg at minute zero, on the
-machine the path was written for.
+That path was a symlink to the system `python3`, and that interpreter cannot import `datasets`
+either. So the fix in the entry above moved the failure instead of removing it. The catalog's
+one machine-local path named an interpreter that would have failed this leg at minute zero, on
+the machine the path was written for.
 
 The capability check asked for the wrong module. It wanted `lcb_runner`, which no interpreter can
 supply: `adapters/lcb.py` puts the checkout on `sys.path` at run time (`--src`, defaulting to

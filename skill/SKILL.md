@@ -212,35 +212,54 @@ field and produce empty `content` when the budget runs out mid-thought.
 
 ## Pointing the battery at this host's data
 
-The frozen standard holds no machine paths. Four legs need data the repo does not redistribute, and each has an env override, so a host that owns the data sets the variable instead of editing the standard.
+The frozen standard holds no machine paths. Four legs need data the repo does not
+redistribute, and each has an env override, so a host that owns the data sets the variable
+instead of editing the standard.
 
-| Variable | Points at | On Badger-001 |
+| Variable | Points at | Example value |
 |---|---|---|
-| `LCB_DATA` | `release_v6` lite jsonl, 175 problems | `/mnt/data/lcb-data/test6.jsonl` (134 MB, read in place, never copied into the repo) |
-| `LCB_SRC` | LiveCodeBench checkout carrying `lcb_runner` | `/mnt/data/lcb-src/LiveCodeBench` |
-| `NLTK_DATA` | punkt/wordnet corpora the IFBench checkers need | `/mnt/data/benchmark-venv/nltk_data` |
-| `PATH` | `tool-eval-bench` (ifeval, toolbench) and `benchlocal-cli` (hermesagent20) | prepend `/mnt/data/benchmark-venv/bin` |
+| `LCB_DATA` | `release_v6` lite jsonl, 175 problems | `/opt/lcb-data/test6.jsonl` (read in place, never copied into the repo) |
+| `LCB_SRC` | LiveCodeBench checkout carrying `lcb_runner` | `/opt/lcb-src/LiveCodeBench` |
+| `NLTK_DATA` | punkt/wordnet corpora the IFBench checkers need | `/opt/benchmark-venv/nltk_data` |
+| `PATH` | `tool-eval-bench` (ifeval, toolbench) and `benchlocal-cli` (hermesagent20) | prepend the bin dir of whatever venv/install carries them |
 
-The benchmark interpreter carries `nltk`, `ifbench` and the lcb scorer's dependencies: `/mnt/data/benchmark-venv/bin/python3`.
+None of these exist by default on any host, this one included. Before setting any of them,
+find out what this host actually has rather than guessing a path:
 
-The LCB leg does not reach that interpreter through `PATH`. Its entry declares
-`interpreter = "/mnt/data/benchmark-venv/bin/python3"` in `legs.toml`, and `run_battery.py` launches
-the leg with that path, because the leg's prompt helpers import `lcb_runner` from the checkout and
-the repo's own venv carries no `datasets`. On a host that keeps those dependencies elsewhere, edit
-the leg entry rather than exporting `PATH` — a relative path is rejected when the catalog validates.
-The PATH row above is only for the legs that shell out to a CLI (`tool-eval-bench`,
-`benchlocal-cli`).
+    find / -xdev -iname 'lcb_runner*' 2>/dev/null
+    find / -xdev -iname 'test6.jsonl' 2>/dev/null
+    python3 -c "import nltk; print(nltk.data.path)" 2>/dev/null
+    command -v tool-eval-bench benchlocal-cli
 
-    export LCB_DATA=/mnt/data/lcb-data/test6.jsonl
-    export LCB_SRC=/mnt/data/lcb-src/LiveCodeBench
-    export NLTK_DATA=/mnt/data/benchmark-venv/nltk_data
-    export PATH=/mnt/data/benchmark-venv/bin:$PATH
+Nothing found means the leg is skipped, with a reason, not a crash. A fresh host with none of
+this installed still runs the legs that need no external data or tool.
 
-Ask the planner what a host will actually run before starting a 14-leg day. Every leg that cannot run names its own reason:
+The LCB leg also needs an interpreter that can `import datasets`; this repo's own venv does
+not carry it. If a separate venv on this host has it, point `LCB_PYTHON` at that venv's
+`python3` (or declare `interpreter = "..."` on the leg's entry in `legs.toml` directly — a
+relative path there is rejected when the catalog validates):
+
+    export LCB_PYTHON=/path/to/that/venv/bin/python3
+    export LCB_DATA=/path/to/test6.jsonl
+    export LCB_SRC=/path/to/LiveCodeBench
+    export NLTK_DATA=/path/to/nltk_data
+    export PATH=/path/to/benchmark/venv/bin:$PATH
+
+Ask the planner what this host will actually run before starting a 14-leg day. Every leg that
+cannot run names its own reason:
 
     python3 scripts/plan_run.py --profile profiles/<name>.toml --no-probe --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['legs']),'run,',len(d['skips']),'skipped'); [print('  skip', s['leg'], '-', s['reason']) for s in d['skips']]"
 
-On Badger-001 that resolves 8 of 14 with nothing exported, and **13 of 14** with the block above. Writing is the fourteenth, and the standard pins its judge model (`nous-glm-5-3-flash`), so nothing needs exporting for the judge model itself — but the leg only scores when that endpoint answers. The judge's key comes from `--judge-api-key`, then `WRITING_JUDGE_API_KEY`, then the run's own `--api-key`. Without a reachable judge it generates every answer and reports itself `not scored` with the reason, exit 0. Generation and scoring are separate steps, so a judge that was down costs a re-score, never a regeneration. `--judge-model` still wins when you want a different judge; the plan sheet then labels the source `(profile)` instead of `(standard)`.
+Run it once with nothing exported and once with the block above exported, and diff the skip
+list — that diff is this host's real answer to "does setting these up help," not a number
+copied from another machine. Writing is scored separately from the thirteen mechanical legs:
+the standard pins its judge model (`nous-glm-5-3-flash`), so nothing needs exporting for the
+judge model itself, but the leg only scores when that endpoint answers. The judge's key comes
+from `--judge-api-key`, then `WRITING_JUDGE_API_KEY`, then the run's own `--api-key`. Without a
+reachable judge it generates every answer and reports itself `not scored` with the reason, exit
+0. Generation and scoring are separate steps, so a judge that was down costs a re-score, never a
+regeneration. `--judge-model` still wins when you want a different judge; the plan sheet then
+labels the source `(profile)` instead of `(standard)`.
 
 ## A leg that says in_repo is not a ported leg
 

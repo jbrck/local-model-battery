@@ -196,11 +196,14 @@ class LegPrereqTest(unittest.TestCase):
         self.assertEqual(resolve_prereqs(LEGS["math500"], STANDARD, host_with()), ())
 
     def test_lcb_resolves_source_data_and_interpreter(self):
-        dependencies = resolve_prereqs(LEGS["lcb"], STANDARD, host_with())
+        """Hermetic: no interpreter is configured, so the leg runs under this venv, which
+        lacks `datasets` -- same as any other host that has not set LCB_PYTHON."""
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
+            dependencies = resolve_prereqs(LEGS["lcb"], STANDARD, host_with())
         self.assertEqual([item.name for item in dependencies],
                          ["lcb_source", "lcb_data", "interpreter_imports"])
         self.assertEqual([item.name for item in unavailable(dependencies)],
-                         ["lcb_source", "lcb_data"])
+                         ["lcb_source", "lcb_data", "interpreter_imports"])
 
     def test_a_borrowed_interpreter_without_the_package_says_so(self):
         """The check is on the capability, not the path: a python that exists but cannot

@@ -1,5 +1,5 @@
 # Edge0-145B Q3_K -- a latent sparse MoE pack (Strata pack index v3) served by the
-# edge0-strata engine on one RTX 3080 20 GB.
+# edge0-strata engine on a single 20 GB consumer GPU.
 #
 # The pack's GGUF describes only the dense skeleton; the 40.81 GiB expert set lives in
 # experts.bin outside it and streams from host RAM through the engine's expert cache, so

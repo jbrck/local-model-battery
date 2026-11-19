@@ -33,7 +33,10 @@ from scripts.lib.harness import leg_config, load_items  # noqa: E402,F401,E501 p
 from scripts.lib.model import ChatResponse, ModelConfig  # noqa: E402,F401,E501 pylint: disable=wrong-import-position,C0413
 
 DEFAULT_DATA = "data/ifbench_prompts.json"
-DEFAULT_NLTK_DATA = "/mnt/data/benchmark-venv/nltk_data"
+# Blank on purpose: NLTK_DATA is appended to nltk's own search path, never replaces it, so an
+# empty value here is a no-op rather than a dead path pointing at a venv that exists nowhere
+# but the machine that wrote it.
+DEFAULT_NLTK_DATA = ""
 LEG_ID = "ifbench"
 EXIT_NOT_RUN = 2
 CLOSE_WAIT_S = 10

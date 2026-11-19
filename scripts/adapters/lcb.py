@@ -26,9 +26,13 @@ from scripts.lib import harness  # noqa: E402
 from scripts.lib.model import ChatResponse, ModelConfig  # noqa: E402
 
 LEG_ID = "lcb"
-DEFAULT_DATA = "/mnt/data/lcb-data/test6.jsonl"
-DEFAULT_SRC = "/mnt/data/lcb-src/LiveCodeBench"
-DEFAULT_SCORER_PYTHON = "/mnt/data/benchmark-venv/bin/python3"
+# Blank on purpose: no path here works on any host but the one that wrote it. The battery's
+# own env resolution (LCB_DATA, LCB_SRC, LCB_PYTHON) is how run_battery.py wires this leg up;
+# these defaults only matter when the script is invoked directly, outside the orchestrator,
+# where an empty value fails as plainly as a stale one would.
+DEFAULT_DATA = ""
+DEFAULT_SRC = ""
+DEFAULT_SCORER_PYTHON = ""
 LCB_CAP = 114688
 DEFAULT_MAX_HOURS = 8.0
 DEFAULT_STALL_MIN = 10
@@ -67,7 +71,8 @@ def parse_args(argv: list[str] | None = None) -> LcbArgs:
     parser.set_defaults(cap=LCB_CAP)
     parser.add_argument("--src", default=os.environ.get("LCB_SRC") or DEFAULT_SRC,
                         help="LiveCodeBench checkout carrying lcb_runner")
-    parser.add_argument("--scorer-python", default=DEFAULT_SCORER_PYTHON,
+    parser.add_argument("--scorer-python",
+                        default=os.environ.get("LCB_PYTHON") or DEFAULT_SCORER_PYTHON,
                         help="interpreter with the scorer's dependencies")
     parser.add_argument("--max-hours", type=float, default=DEFAULT_MAX_HOURS)
     parser.add_argument("--stall-min", type=int, default=DEFAULT_STALL_MIN)

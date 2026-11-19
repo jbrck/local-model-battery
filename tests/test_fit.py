@@ -21,7 +21,7 @@ from scripts.lib.fit import (  # noqa: E402
     parse_kv_bits,
 )
 
-GPU_24 = Gpu(index=0, name="RTX 3090", vram_total_mb=24576, vram_used_mb=0, power_limit_w=350.0)
+GPU_24 = Gpu(index=0, name="RTX 4080", vram_total_mb=24576, vram_used_mb=0, power_limit_w=350.0)
 GPU_20S = (Gpu(index=0, name="RTX 3080", vram_total_mb=20480, vram_used_mb=0),
            Gpu(index=1, name="RTX 3080", vram_total_mb=20480, vram_used_mb=0))
 # 27B dense shape: 64 layers, 8 KV heads, 128-wide heads.

@@ -18,14 +18,16 @@ PACK_ID = "hermesagent-20"
 
 
 def runner() -> str:
-    """Where benchlocal-cli lives on THIS host.
+    """Where benchlocal-cli lives on this host.
 
     The leg used to hardcode one machine's venv path, so a run on any other box died
     with FileNotFoundError before a single scenario ran. Resolve at call time: explicit
-    BENCHLOCAL_BIN, then PATH, then the bench-venv install this fleet uses.
+    BENCHLOCAL_BIN, then PATH. No machine-local fallback path ships here -- a literal
+    path only works on the one machine it was written for, and this leg's own prereqs
+    entry (benchlocal_cli) already reports "not available" before this is ever called,
+    so an empty result just means the prereq gate caught the gap first.
     """
-    return (os.environ.get("BENCHLOCAL_BIN") or shutil.which("benchlocal-cli")
-            or "/mnt/models/bench/bench-venv/bin/benchlocal-cli")
+    return os.environ.get("BENCHLOCAL_BIN") or shutil.which("benchlocal-cli") or ""
 
 
 SANDBOX_FLAG = "--enable-sandboxed-packs"

@@ -13,7 +13,7 @@
 | Fact | Value |
 |---|---|
 | Engines in the reference collection | llama.cpp, exllamav3, vLLM (OrcaSAQ2-kernel), Ollama, Strata 0.1.57 + DFlash2 |
-| Model records | 27 on rtx-3090, 1 on rtx-3080-dual-mod |
+| Model records | 27 on one host, 1 on a second, dual-GPU host |
 | Live probe, llama.cpp :11434 | ctx 131072, slots 1, thinking switch True, build `b10909-a2878d30d` |
 | Live probe, LiteLLM :4000 | reachable, every engine fact `None`, `props: HTTP 404` |
 | Profile math vs GGUF, Swift-Qwen3.8-27B | 65/4/213 typed vs 17/4/256 real. 108 KiB/token typed vs 34 real |
@@ -341,7 +341,7 @@ Two things the plan below got wrong, both corrected in the implementation:
 
 **Files:**
 - Modify: `README.md`, `profiles/README.md`, `implementation-notes.md`, `skill/SKILL.md`
-- Modify: `/mnt/data/hermes/skills/local-battery-setup/SKILL.md` (via skill_manage)
+- Modify: `<hermes-skills-dir>/local-battery-setup/SKILL.md` (via skill_manage)
 
 `profiles/README.md` currently tells the operator to copy numbers off `/props` by hand and derive `head_dim = n_embd / n_head`. That instruction produced the 4x error. Replace it with: profiles are an override for models the probes cannot reach, and the probe is the normal path.
 
@@ -351,7 +351,7 @@ Then:
 
 ```bash
 .venv/bin/python3 -m unittest discover -s tests -t . -q
-python3 /mnt/data/hermes/skills/quality-gauntlet/scripts/gauntlet.py --src-dir scripts --test-dir tests --json
+python3 <path-to-quality-gauntlet>/scripts/gauntlet.py --src-dir scripts --test-dir tests --json
 git status
 ```
 
@@ -445,7 +445,7 @@ Task 10                   (last, with everything it has to document)
 1. `python3 scripts/plan_run.py --endpoint URL` with no `--profile` produces a full sheet with the model's numbers read from the file, on any of the five engines.
 2. A vLLM run stamps `engine=vllm` and its window from `max_model_len`.
 3. KV and flash-attn rows say what the engine said, or that the engine has no such knob.
-4. `grep -rn "/mnt/data" legs.toml standard.toml` returns nothing outside documented env-var examples.
+4. A repo-wide grep for an absolute path under any host's data mount returns nothing outside documented env-var examples.
 5. `run_battery.py --detach` returns and the run continues; `--status` reports it.
 6. A leg interrupted mid-run resumes without regenerating what is already on disk.
 7. `scripts/report.py results/<run>` produces the run's document, and says what the run cannot be compared to.

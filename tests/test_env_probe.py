@@ -30,7 +30,7 @@ from scripts.lib.env_probe import (  # noqa: E402
 
 class GpuTest(unittest.TestCase):
     def test_free_vram_is_total_minus_used(self):
-        gpu = Gpu(index=0, name="RTX 3090", vram_total_mb=24576, vram_used_mb=11264)
+        gpu = Gpu(index=0, name="RTX 4080", vram_total_mb=24576, vram_used_mb=11264)
         self.assertEqual(gpu.vram_free_mb, 13312)
         self.assertAlmostEqual(gpu.vram_total_gb, 24.0)
 
@@ -109,7 +109,7 @@ class VramAttributionTest(unittest.TestCase):
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
     def _host(self) -> HostFacts:
-        return HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+        return HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 19670, 350.0),),
                          compute_apps=self.APPS)
 
     def test_the_listener_pid_is_read_from_ss(self):
@@ -233,7 +233,7 @@ class FakeNvidiaSmiTest(unittest.TestCase):
         self.install_smi(
             "#!/bin/sh\n"
             "echo 'N/A, junk, 1, 2, 3'\n"
-            "echo '0, NVIDIA GeForce RTX 3090, 24576, 19727, 300.00'\n"
+            "echo '0, NVIDIA GeForce RTX 4080, 24576, 19727, 300.00'\n"
             "echo '1, Small Card, 8192, 0, [N/A]'\n"
         )
         gpus, error = _query_gpus()
@@ -338,6 +338,57 @@ class MeminfoFixtureTest(unittest.TestCase):
     def test_a_missing_proc_file_reports_unknowns(self):
         env_probe.MEMINFO_PATH = "/nonexistent/meminfo"
         self.assertEqual(_read_meminfo(), (None, None, None))
+
+
+class DarwinHostFactsTest(unittest.TestCase):
+    """macOS has no /proc -- these probes go through sysctl and vm_stat instead."""
+
+    @staticmethod
+    def _run_stub(command):
+        if command[:2] == ["sysctl", "-n"] and command[2] != "vm.swapusage":
+            responses = {"hw.memsize": "34359738368", "hw.pagesize": "4096",
+                        "machdep.cpu.brand_string": "Apple M2 Pro"}
+            value = responses.get(command[2])
+            if value is None:
+                return None
+            return subprocess.CompletedProcess(command, 0, stdout=value + "\n", stderr="")
+        if command == ["sysctl", "-n", "vm.swapusage"]:
+            stdout = "total = 1024.00M  used = 256.50M  free = 767.50M\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command == ["vm_stat"]:
+            stdout = ("Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+                      "Pages free:                             100000.\n"
+                      "Pages inactive:                          50000.\n"
+                      "Pages active:                            200000.\n")
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        return None
+
+    def setUp(self):
+        self.platform_patch = mock.patch.object(env_probe.platform, "system",
+                                                 return_value="Darwin")
+        self.platform_patch.start()
+        self.addCleanup(self.platform_patch.stop)
+        self.run_patch = mock.patch.object(env_probe, "_run", side_effect=self._run_stub)
+        self.run_patch.start()
+        self.addCleanup(self.run_patch.stop)
+
+    def test_meminfo_reads_total_available_and_swap_from_sysctl_and_vm_stat(self):
+        total, available, swap = _read_meminfo()
+        self.assertEqual(total, 32.0)
+        self.assertEqual(available, round(150000 * 4096 / (1024 ** 3), 1))
+        self.assertEqual(swap, round(256.50 / 1024, 1))
+
+    def test_cpu_model_comes_from_sysctl_brand_string(self):
+        model, threads = env_probe._read_cpu()
+        self.assertEqual(model, "Apple M2 Pro")
+        self.assertEqual(threads, os.cpu_count())
+
+    def test_a_missing_sysctl_binary_reports_unknowns_not_a_crash(self):
+        with mock.patch.object(env_probe, "_run", return_value=None):
+            self.assertEqual(_read_meminfo(), (None, None, None))
+            model, threads = env_probe._read_cpu()
+            self.assertIsNone(model)
+            self.assertEqual(threads, os.cpu_count())
 
 
 class LiveProbeTest(unittest.TestCase):

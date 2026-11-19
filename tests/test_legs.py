@@ -200,12 +200,23 @@ class InterpreterTest(unittest.TestCase):
         self.assertEqual(choice.path, "/elsewhere/bin/python3")
         self.assertEqual(choice.source, "environment")
 
-    def test_the_standard_supplies_the_path_when_the_variable_is_unset(self):
+    def test_the_standard_can_supply_a_path_when_the_variable_is_unset(self):
+        """Mechanism test: an operator may fill this in locally without editing the leg."""
         leg, standard = self.lcb()
+        standard = {**standard, "interpreters": {"LCB_PYTHON": "/elsewhere/bin/python3"}}
         with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
             choice = resolve_interpreter(leg, standard)
         self.assertEqual(choice.source, "standard")
-        self.assertEqual(choice.path, standard["interpreters"]["LCB_PYTHON"])
+        self.assertEqual(choice.path, "/elsewhere/bin/python3")
+
+    def test_the_shipped_standard_declares_no_machine_local_interpreter(self):
+        """The committed standard.toml ships blank here -- it's this host's to set, not ours."""
+        leg, standard = self.lcb()
+        self.assertEqual(standard.get("interpreters", {}).get("LCB_PYTHON", ""), "")
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
+            choice = resolve_interpreter(leg, standard)
+        self.assertEqual(choice.source, "this interpreter")
+        self.assertEqual(choice.path, sys.executable)
 
     def test_a_leg_with_nothing_declared_runs_under_this_interpreter(self):
         choice = resolve_interpreter(make_leg(), {})

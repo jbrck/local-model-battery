@@ -22,7 +22,7 @@ from tests.stub_json import JsonStub  # noqa: E402
 PROPS = {
     "build_info": "b10909-a2878d30d",
     "total_slots": 1,
-    "model_path": "/mnt/models/qwen/qwen3-8b-q4_k_m.gguf",
+    "model_path": "/models/qwen/qwen3-8b-q4_k_m.gguf",
     "chat_template": "{% if enable_thinking %}",
     "default_generation_settings": {"n_ctx": 131072},
 }

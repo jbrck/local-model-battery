@@ -22,6 +22,7 @@ from scripts.lib.legs import Interpreter, load_legs  # noqa: E402
 from scripts.lib.model_probe import ModelShape  # noqa: E402
 from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_from_dict import plan_from_dict  # noqa: E402
+from scripts.lib.prereqs import Dependency  # noqa: E402
 from scripts.manifest import build_manifest  # noqa: E402
 from scripts.lib.plan_run import (  # noqa: E402
     Decision,
@@ -81,7 +82,7 @@ class ShapeSourceTest(unittest.TestCase):
     READ = ModelShape(arch="qwen35", n_layers=17, n_kv_heads=4, head_dim=256,
                       kv_elements_per_token=4352, kv_fixed_elements=8 * 1024 * 1024,
                       weights_bytes=int(4.25 * 1024 ** 3), source="gguf",
-                      path="/mnt/models/llamacpp/swift-qwen3.8-27B/Swift-Qwen3.8-27B-Q4_K_M.gguf")
+                      path="/models/llamacpp/swift-qwen3.8-27B/Swift-Qwen3.8-27B-Q4_K_M.gguf")
 
     def test_a_read_shape_is_named_and_priced(self):
         result = plan(FITS, shape=self.READ)
@@ -124,12 +125,12 @@ class VramCreditTest(unittest.TestCase):
     tier on the sheet: 19.0 GB of a 24 GB card belongs to the model under test or it does not.
     """
 
-    HOST = replace(RICH, gpus=(Gpu(0, "RTX 3090", 24576, 19670, 350.0),),
+    HOST = replace(RICH, gpus=(Gpu(0, "RTX 4080", 24576, 19670, 350.0),),
                    compute_apps=({"gpu_uuid": "GPU-1", "pid": "1748",
                                   "process_name": "llama-server", "used_memory_mb": 19414.0},
                                  {"gpu_uuid": "GPU-1", "pid": "8248",
                                   "process_name": "python3", "used_memory_mb": 256.0}))
-    READ = replace(ShapeSourceTest.READ, path="/mnt/models/llamacpp/swift/q4.gguf")
+    READ = replace(ShapeSourceTest.READ, path="/models/llamacpp/swift/q4.gguf")
 
     def test_the_vram_the_endpoint_holds_is_credited_to_the_run(self):
         counted = plan(FITS, host=self.HOST, shape=self.READ)
@@ -223,7 +224,7 @@ class FitAndWindowTest(unittest.TestCase):
         self.assertGreater(ctx - 16384, 8192)
 
     def test_a_11gb_occupant_pushes_the_same_model_off_the_card(self):
-        busy = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 11264, 350.0),), ram_total_gb=64.0,
+        busy = HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 11264, 350.0),), ram_total_gb=64.0,
                          ram_available_gb=60.0, tools=TOOLS)
         result = plan(FITS, host=busy)
         self.assertEqual(result.fit.tier, "T2")
@@ -268,7 +269,7 @@ class FitAndWindowTest(unittest.TestCase):
 class MeasuredCostTest(unittest.TestCase):
     """An open question has to say what each answer costs, not just that a question exists."""
 
-    BUSY = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 11264, 350.0),), ram_total_gb=64.0,
+    BUSY = HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 11264, 350.0),), ram_total_gb=64.0,
                      ram_available_gb=60.0, tools=TOOLS)
 
     def test_a_question_the_operator_owns_carries_the_measured_cost(self):
@@ -322,6 +323,8 @@ class CapTest(unittest.TestCase):
         self.assertEqual(row.standard_value, "60000")
 
     def test_lcb_keeps_the_widest_cap_the_window_allows(self):
+        """Hermetic: the interpreter check is mocked available so a venv's actual
+        `datasets` install (or lack of it) can't decide whether this leg gets planned."""
         with tempfile.TemporaryDirectory() as folder:
             Path(folder, "test6.jsonl").write_text('{"question_id": 1}\n')
             present = copy.deepcopy(STANDARD)
@@ -331,7 +334,9 @@ class CapTest(unittest.TestCase):
                     entry["sha256_16"] = ""
                 if entry["id"] == "lcb_source":
                     entry["path"] = folder
-            result = plan(FITS, standard=present, selected=("lcb", "math500"))
+            stub = Dependency("interpreter_imports", True, "stubbed for this test")
+            with mock.patch("scripts.lib.prereqs.interpreter_dependency", return_value=stub):
+                result = plan(FITS, standard=present, selected=("lcb", "math500"))
             lcb = runnable(result, "lcb")
             self.assertEqual(lcb.cap, min(114688, lcb.ctx - 16384))
             self.assertLess(lcb.cap, 114688)
@@ -459,7 +464,7 @@ class DecisionRowTest(unittest.TestCase):
         self.assertFalse(payload["options"][1]["recommended"])
 
     def test_the_render_marks_the_recommended_option_and_the_measured_cost(self):
-        busy = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 11264, 350.0),), ram_total_gb=64.0,
+        busy = HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 11264, 350.0),), ram_total_gb=64.0,
                          ram_available_gb=60.0, tools=TOOLS)
         sheet = plan(FITS, host=busy).render()
         self.assertIn("* keep thinking on", sheet)
@@ -723,7 +728,7 @@ class ScriptEntryTest(unittest.TestCase):
     PROFILE = ('id = "sheet-test"\nweights_gb = 5.2\n\n[model]\n'
                'n_layers = 32\nn_kv_heads = 8\nhead_dim = 128\n')
 
-    QUIET_HOST = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 0, 350.0),),
+    QUIET_HOST = HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 0, 350.0),),
                            ram_total_gb=64.0, ram_available_gb=60.0)
 
     def test_the_script_form_prints_the_decision_sheet_and_exits_cleanly(self):
@@ -749,6 +754,9 @@ class InterpreterSheetTest(unittest.TestCase):
     """The sheet has to say when a leg runs under a different interpreter, and why."""
 
     def lcb_plan(self):
+        """A host that has set LCB_PYTHON to a venv elsewhere on this machine -- the
+        import check itself is mocked available, since what matters here is attribution
+        (which path, and why), not whether this particular venv carries `datasets`."""
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         Path(folder.name, "test6.jsonl").write_text('{"question_id": 1}\n')
@@ -759,7 +767,13 @@ class InterpreterSheetTest(unittest.TestCase):
                 entry["sha256_16"] = ""
             if entry["id"] == "lcb_source":
                 entry["path"] = folder.name
-        return plan(FITS, standard=present, selected=("lcb", "math500"))
+        present["interpreters"] = {"LCB_PYTHON": "/opt/lcb-venv/bin/python3"}
+        stub = Dependency("interpreter_imports", True, "/opt/lcb-venv/bin/python3 (standard)")
+        patcher = mock.patch("scripts.lib.prereqs.interpreter_dependency", return_value=stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with mock.patch.dict(os.environ, {"LCB_PYTHON": ""}):
+            return plan(FITS, standard=present, selected=("lcb", "math500"))
 
     def test_a_leg_that_borrows_an_interpreter_says_so(self):
         row = decision(self.lcb_plan(), "interpreter:lcb")

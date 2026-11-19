@@ -505,17 +505,17 @@ class HostSection(unittest.TestCase):
     """Section 1 renders every fact it was given, each naming its source."""
 
     RICH = HostFacts(
-        gpus=(Gpu(0, "RTX 3090", 24576, 0, 350.0),),
+        gpus=(Gpu(0, "RTX 4080", 24576, 0, 350.0),),
         ram_total_gb=64.0, ram_available_gb=60.0, swap_used_gb=2.0,
-        cpu_model="i7-8700K", cpu_threads=12, numa_nodes=2,
+        cpu_model="Ryzen 9 7900X", cpu_threads=12, numa_nodes=2,
         tools=(ToolFact("docker", "/usr/bin/docker", "27.0"),
                ToolFact("benchlocal-cli", None, None)))
 
     def test_a_full_host_renders_every_line(self):
         text = render_host(self.RICH)
-        self.assertIn("- accelerator 0: RTX 3090, 24.0 GB total, 24.0 GB free", text)
+        self.assertIn("- accelerator 0: RTX 4080, 24.0 GB total, 24.0 GB free", text)
         self.assertIn("- memory: 64.0 GB total, 60.0 GB available, 2.0 GB swap in use", text)
-        self.assertIn("- cpu: i7-8700K, 12 threads", text)
+        self.assertIn("- cpu: Ryzen 9 7900X, 12 threads", text)
         self.assertIn("- numa nodes: 2", text)
         self.assertIn("- tool docker: present at /usr/bin/docker, reports 27.0", text)
 

@@ -29,10 +29,10 @@ TOOLS = (ToolFact("docker", "/usr/bin/docker", "27.0"),
          ToolFact("benchlocal-cli", "/usr/local/bin/benchlocal-cli", "0.4"),
          ToolFact("tool-eval-bench", "/usr/local/bin/tool-eval-bench", "1.2"))
 
-# 3090: one 24 GB card, 64 GB of RAM, every external tool present.
-RICH = HostFacts(gpus=(Gpu(0, "RTX 3090", 24576, 0, 350.0),), ram_total_gb=64.0,
-                 ram_available_gb=60.0, cpu_model="i7-8700K", cpu_threads=12, tools=TOOLS)
-# 3080 x2: 40 GB of VRAM in total but 20 GB per card, and nothing else installed.
+# one 24 GB card, 64 GB of RAM, every external tool present.
+RICH = HostFacts(gpus=(Gpu(0, "RTX 4080", 24576, 0, 350.0),), ram_total_gb=64.0,
+                 ram_available_gb=60.0, cpu_model="Ryzen 9 7900X", cpu_threads=12, tools=TOOLS)
+# two cards, 20 GB each, 40 GB of VRAM in total, and nothing else installed.
 PAIR = HostFacts(gpus=(Gpu(0, "RTX 3080", 20480, 0, 320.0), Gpu(1, "RTX 3080", 20480, 0, 320.0)),
                  ram_total_gb=96.0, ram_available_gb=88.0, tools=())
 BAREMETAL = HostFacts(ram_total_gb=32.0, ram_available_gb=28.0, gpu_error="nvidia-smi not found")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import glob
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -207,6 +208,8 @@ def listener_pid(port: int) -> int | None:
 
     A container's port shows no owner from the host, so an endpoint behind a proxy has no pid
     here. That is not an error: the caller falls back to counting the VRAM as someone else's.
+    Linux-only (`ss`): on macOS this returns None, which is the same safe degradation, and
+    moot in practice there since `_query_gpus` already reports no accelerator to credit.
     """
     result = _run(["ss", "-tlnpH", f"sport = :{port}"])
     if result is None or result.returncode != 0:
@@ -259,8 +262,66 @@ def _meminfo_values(path: str) -> dict[str, float]:
     return values
 
 
+def _darwin_sysctl(name: str) -> str | None:
+    """A single sysctl value, or None when the key or the binary is missing."""
+    result = _run(["sysctl", "-n", name])
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _darwin_sysctl_int(name: str) -> int | None:
+    value = _darwin_sysctl(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _darwin_vm_stat() -> dict[str, int]:
+    """Page counts from vm_stat, keyed by the label before the colon."""
+    result = _run(["vm_stat"])
+    if result is None or result.returncode != 0:
+        return {}
+    values: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        name, _, rest = line.partition(":")
+        rest = rest.strip().rstrip(".")
+        if rest.isdigit():
+            values[name.strip()] = int(rest)
+    return values
+
+
+def _read_meminfo_darwin() -> tuple[float | None, float | None, float | None]:
+    """(total GB, available GB, swap used GB) via sysctl + vm_stat -- macOS has no /proc.
+
+    "Available" here means free-plus-inactive pages, the same approximation Activity
+    Monitor uses; macOS reclaims inactive pages on demand, so counting them as used would
+    understate headroom a model load can actually get.
+    """
+    total_bytes = _darwin_sysctl_int("hw.memsize")
+    total = round(total_bytes / (1024 ** 3), 1) if total_bytes else None
+    page_bytes = _darwin_sysctl_int("hw.pagesize") or 4096
+    pages = _darwin_vm_stat()
+    available = None
+    if pages:
+        free_pages = pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
+        available = round(free_pages * page_bytes / (1024 ** 3), 1)
+    swap_used = None
+    swap_text = _darwin_sysctl("vm.swapusage")
+    if swap_text:
+        match = re.search(r"used\s*=\s*([\d.]+)M", swap_text)
+        if match:
+            swap_used = round(float(match.group(1)) / 1024, 1)
+    return total, available, swap_used
+
+
 def _read_meminfo() -> tuple[float | None, float | None, float | None]:
-    """(total GB, available GB, swap used GB) from /proc/meminfo."""
+    """(total GB, available GB, swap used GB), from whatever this platform exposes."""
+    if platform.system() == "Darwin":
+        return _read_meminfo_darwin()
     if not os.path.isfile(MEMINFO_PATH):
         return None, None, None
     values = _meminfo_values(MEMINFO_PATH)
@@ -274,8 +335,15 @@ def _read_meminfo() -> tuple[float | None, float | None, float | None]:
             swap_used)
 
 
+def _read_cpu_darwin() -> tuple[str | None, int | None]:
+    """CPU model string and thread count, via sysctl -- macOS has no /proc/cpuinfo."""
+    return _darwin_sysctl("machdep.cpu.brand_string"), os.cpu_count()
+
+
 def _read_cpu() -> tuple[str | None, int | None]:
     """CPU model string and thread count."""
+    if platform.system() == "Darwin":
+        return _read_cpu_darwin()
     model = None
     if os.path.isfile(CPUINFO_PATH):
         with open(CPUINFO_PATH, encoding="utf-8") as handle:

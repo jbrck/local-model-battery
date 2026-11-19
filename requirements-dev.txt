@@ -4,7 +4,7 @@
 # the legs, which need sympy from requirements.txt.
 #
 #   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-#   .venv/bin/python /mnt/data/hermes/skills/quality-gauntlet/scripts/gauntlet.py \
+#   .venv/bin/python <path-to-quality-gauntlet>/scripts/gauntlet.py \
 #       --src-dir scripts --test-dir tests --cov-module scripts
 #
 # Run it with the tool venv instead and every test module that imports a repo dependency

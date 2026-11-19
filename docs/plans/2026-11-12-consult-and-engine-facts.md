@@ -227,7 +227,7 @@ scripts/consult.py [--endpoint URL] [--api-key K] [--model-file PATH] [--model-d
 
 **Files:**
 - Modify: `README.md`, `profiles/README.md`, `implementation-notes.md`, `docs/plans/2026-11-12-universal-setup.md` (status table)
-- Modify: `/mnt/data/hermes/skills/local-battery-setup/SKILL.md` via `skill_manage`
+- Modify: `<hermes-skills-dir>/local-battery-setup/SKILL.md` via `skill_manage`
 - Add: `skill/SKILL.md` section covering the consult step
 
 `profiles/README.md` tells the operator to copy numbers off `/props` by hand and derive `head_dim = n_embd / n_head`. That instruction produced the 4x error. It becomes: a profile is an override for a model no probe can describe, and the probe is the normal path.
@@ -236,7 +236,7 @@ Then, serially, not in parallel:
 
 ```bash
 .venv/bin/python3 -m unittest discover -s tests -t . -q
-.venv/bin/python3 /mnt/data/hermes/skills/quality-gauntlet/scripts/gauntlet.py --src-dir scripts --test-dir tests --json --no-progress
+.venv/bin/python3 <path-to-quality-gauntlet>/scripts/gauntlet.py --src-dir scripts --test-dir tests --json --no-progress
 git status
 ```
 
