@@ -546,21 +546,43 @@ def prompt_headroom(standard: dict) -> int:
     return _digit(get_dotted(standard, "caps.prompt_headroom"), DEFAULT_PROMPT_HEADROOM)
 
 
-def plan_ctx(standard: dict, fit: Fit, footprint: Footprint,
-             largest_cap: int) -> tuple[int, Decision | None]:
+def plan_ctx(standard: dict, fit: Fit, footprint: Footprint, largest_cap: int,
+             engine_window: int | None = None) -> tuple[int, Decision | None]:
     """The window the run will use, and the decision behind it when it is not the standard's."""
     standard_ctx = _digit(get_dotted(standard, "serve.ctx", 0), 0)
     headroom = prompt_headroom(standard)
     needed = largest_cap + headroom
     if fit.estimate and fit.tier != "T4":
-        return standard_ctx, Decision(
-            variable="ctx", kind=KIND_CAPACITY,
-            chosen=str(standard_ctx), standard_value=str(standard_ctx),
-            consequence=f"placement is the engine's call here ({fit.reason}), so the window "
-                        f"is a guess until /props reports it",
+        if engine_window is None:
+            return standard_ctx, Decision(
+                variable="ctx", kind=KIND_CAPACITY,
+                chosen=str(standard_ctx), standard_value=str(standard_ctx),
+                consequence=f"placement is the engine's call here ({fit.reason}), so the window "
+                            f"is a guess until /props reports it",
+                source=ENGINE, needs_operator=True,
+                options=(Option("serve, then read /props", "the run stamps the window the server "
+                              "actually reports", recommended=True),))
+        # /props has already reported the engine's real window, so there is no need to keep
+        # guessing: clamp to the measured value instead of stamping the standard's forever.
+        if engine_window >= standard_ctx:
+            return standard_ctx, None
+        fits_legs = engine_window >= needed
+        detail = (f"the standard serves {standard_ctx} tokens and /props reports this engine "
+                  f"at {engine_window} tokens ({fit.reason})")
+        if fits_legs:
+            detail += (f"; every planned leg needs at most {needed}, so they still run whole, "
+                       f"but the numbers do not compare with a full-window run")
+        else:
+            detail += (f"; the largest planned leg needs {needed}, so caps are clamped to keep "
+                       f"the prompt inside the window")
+        return engine_window, Decision(
+            variable="ctx", kind=KIND_MEASUREMENT,
+            chosen=str(engine_window), standard_value=str(standard_ctx),
+            consequence=detail,
             source=ENGINE, needs_operator=True,
-            options=(Option("serve, then read /props", "the run stamps the window the server "
-                          "actually reports", recommended=True),))
+            options=(Option(f"run at {engine_window} tokens",
+                   f"stamp ctx={engine_window}, off-standard; keep it for every run on this "
+                   f"engine so at least those numbers compare with each other", recommended=True),))
     if fit.max_ctx >= standard_ctx:
         return standard_ctx, None
     # The window is part of the environment a score was taken in, so a host that cannot serve the
@@ -1138,11 +1160,11 @@ def plan_run(standard: dict, legs: list[Leg], variables: list[Variable], profile
     chosen = _selected_legs(legs, selected)
     fit, footprint = compute_plan_fit(profile, standard, host, model_shape, serving_pid)
     largest_cap = max((resolve_cap(leg, standard) for leg in chosen), default=0)
-    ctx, ctx_decision = plan_ctx(standard, fit, footprint, largest_cap)
+    engine_facts = engine if engine is not None else EngineFacts()
+    ctx, ctx_decision = plan_ctx(standard, fit, footprint, largest_cap, engine_facts.window)
     request = _thinking_request(profile)
     planned, skips, leg_decisions = plan_legs(chosen, standard, ctx, request, server, host,
                                               judge, pilot)
-    engine_facts = engine if engine is not None else EngineFacts()
     inputs = _PlanInputs(standard=standard, variables=variables, profile=profile, host=host,
                          server=server, pilot=pilot, judge=judge, fit=fit,
                          footprint=footprint, engine=engine_facts,

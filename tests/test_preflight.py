@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -246,6 +247,13 @@ class CliTest(unittest.TestCase):
                              delay_s=0.01)
         self.stub._thread.start()
         self.addCleanup(self.stub.close)
+        # The check count below is only deterministic if the host it runs against is.
+        # The real host this test runs on varies by machine and by platform (RAM, swap,
+        # docker, GPU count), which flexes which checks/warnings fire. Pin it to a known
+        # fixture host instead of the live one.
+        self.host_patch = mock.patch("scripts.preflight.probe_host", return_value=RICH)
+        self.host_patch.start()
+        self.addCleanup(self.host_patch.stop)
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.profile = Path(self.folder.name) / "stub-profile.toml"
@@ -264,7 +272,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue((out / "run-plan.json").is_file())
         payload = json.loads((out / PREFLIGHT_FILE).read_text())
         self.assertEqual(payload["model"], "stub-27b")
-        self.assertEqual(len(payload["checks"]), 9)
+        self.assertEqual(len(payload["checks"]), 7)
 
     def test_a_second_run_into_the_same_directory_is_refused(self):
         out = Path(self.folder.name) / "run"

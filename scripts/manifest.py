@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib.config import repo_path  # noqa: E402
 from scripts.lib.env_probe import HostFacts  # noqa: E402
+from scripts.lib.pilot import PilotResult  # noqa: E402
 from scripts.lib.plan_run import BATTERY_VERSION, RunPlan  # noqa: E402
 from scripts.lib.server_probe import ServerFacts  # noqa: E402
 
@@ -96,9 +97,12 @@ def config_fingerprint(plan: RunPlan) -> dict:
     }
 
 
-def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts | None) -> dict:
+def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts | None,
+                   pilot: PilotResult | None = None) -> dict:
     """Everything needed to say later exactly what this run was."""
     config = config_fingerprint(plan)
+    pilot_tps = round(pilot.tps, 1) if pilot and not pilot.stalled and pilot.tps else \
+        plan.stamp.get("pilot_tps", "")
     return {
         "battery_version": BATTERY_VERSION,
         "standard_version": plan.standard_version,
@@ -119,7 +123,7 @@ def build_manifest(plan: RunPlan, host: HostFacts, server: ServerFacts | None) -
             "cpu": host.cpu_model, "cpu_threads": host.cpu_threads,
             "tools": {tool.name: tool.version for tool in host.tools},
         },
-        "pilot_tps": plan.stamp.get("pilot_tps", ""),
+        "pilot_tps": pilot_tps,
         "stamp_line": plan.stamp_line,
         "stamp": plan.stamp,
         "fit": plan.fit.to_dict(),
@@ -143,10 +147,11 @@ def _serve_hint(server: ServerFacts | None) -> str:
 
 
 def start(out_dir: Path, plan: RunPlan, host: HostFacts, server: ServerFacts | None,
-          resume: bool = False, manifest: dict | None = None) -> Path:
+          resume: bool = False, manifest: dict | None = None,
+          pilot: PilotResult | None = None) -> Path:
     """Write MANIFEST.json, refusing to continue a directory whose configuration moved."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    payload = manifest if manifest is not None else build_manifest(plan, host, server)
+    payload = manifest if manifest is not None else build_manifest(plan, host, server, pilot)
     path = out_dir / MANIFEST_FILE
     if path.exists():
         previous = json.loads(path.read_text())

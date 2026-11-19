@@ -326,8 +326,8 @@ Judge quality on this stack, on the XP-001 task with a deliberately bad and a de
 ```bash
 python3 -m unittest discover -s tests -t .
 python3 scripts/check_catalogs.py
-PATH=/home/jwpb/hermes-state/skills/venvs/quality-gauntlet/bin:$PATH \
-  python3 /home/jwpb/hermes-state/skills/skills/quality-gauntlet/scripts/gauntlet.py \
+PATH=<path-to-quality-gauntlet>/venvs/quality-gauntlet/bin:$PATH \
+  python3 <path-to-quality-gauntlet>/scripts/gauntlet.py \
   --src-dir scripts --test-dir tests
 ```
 

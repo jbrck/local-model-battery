@@ -280,6 +280,8 @@ class UnreadableState(TempRun):
     def test_cmdline_of_a_dead_pid_is_unknown(self):
         self.assertEqual(detach._cmdline_mentions(self.reap_child(), "run_battery"), "unknown")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"),
+                          "cmdline matching reads /proc, Linux-only")
     def test_cmdline_of_this_process_matches_and_mismatches(self):
         self.assertEqual(detach._cmdline_mentions(os.getpid(), "python"), "match")
         self.assertEqual(detach._cmdline_mentions(os.getpid(), "no-such-needle"), "mismatch")

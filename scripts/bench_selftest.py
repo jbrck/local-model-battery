@@ -42,6 +42,7 @@ _IMPORT_SNIPPET = (
     "sys.path.insert(0, sys.argv[2])\n"
     "spec = importlib.util.spec_from_file_location('leg_entry', sys.argv[1])\n"
     "module = importlib.util.module_from_spec(spec)\n"
+    "sys.modules['leg_entry'] = module\n"
     "spec.loader.exec_module(module)\n"
 )
 

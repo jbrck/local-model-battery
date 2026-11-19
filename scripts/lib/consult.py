@@ -13,6 +13,7 @@ loudly instead of printing an empty section.
 """
 from __future__ import annotations
 
+import platform
 import re
 from dataclasses import dataclass
 
@@ -349,22 +350,24 @@ def _accelerator_lines(host: HostFacts) -> list[str]:
 
 def _memory_lines(host: HostFacts) -> list[str]:
     """The memory line with its optional available and swap parts, or unknown."""
+    source = "sysctl + vm_stat" if platform.system() == "Darwin" else "/proc/meminfo"
     if host.ram_total_gb is None:
-        return [_unknown_line("memory", "/proc/meminfo is not readable on this host")]
+        return [_unknown_line("memory", f"{source} is not readable on this host")]
     memory = f"- memory: {host.ram_total_gb} GB total"
     if host.ram_available_gb is not None:
         memory += f", {host.ram_available_gb} GB available"
     if host.swap_used_gb:
         memory += f", {host.swap_used_gb} GB swap in use"
-    return [f"{memory} (source: /proc/meminfo)"]
+    return [f"{memory} (source: {source})"]
 
 
 def _cpu_lines(host: HostFacts) -> list[str]:
-    """The cpu line, or unknown when /proc/cpuinfo gave neither model nor threads."""
+    """The cpu line, or unknown when the platform's probe gave neither model nor threads."""
+    source = "sysctl" if platform.system() == "Darwin" else "/proc/cpuinfo"
     if not (host.cpu_model or host.cpu_threads):
-        return [_unknown_line("cpu", "/proc/cpuinfo is not readable on this host")]
+        return [_unknown_line("cpu", f"{source} is not readable on this host")]
     model = host.cpu_model or "model not reported"
-    return [f"- cpu: {model}, {host.cpu_threads} threads (source: /proc/cpuinfo)"]
+    return [f"- cpu: {model}, {host.cpu_threads} threads (source: {source})"]
 
 
 def _numa_lines(host: HostFacts) -> list[str]:

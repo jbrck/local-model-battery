@@ -18,7 +18,7 @@ another number.
 |---|---|---|
 | `id` | the name this run uses, defaults to the file stem | you |
 | `weights_gb` | size of the weights on disk | `ls -l` the model file, divide bytes by 1073741824 |
-| `quant` | the quant label, for the record | the filename, e.g. `Q4_K_M` |
+| `weight_quant` | the quant label, for the record | the filename, e.g. `Q4_K_M` |
 | `[model].n_layers` | transformer block count | the model's own published metadata |
 | `[model].n_kv_heads` | KV heads (GQA) | the model's own published metadata; equal to `n_head` only when there is no GQA |
 | `[model].head_dim` | attention head dimension | the model's own published metadata. Some architectures have a `head_dim` that differs from `n_embd / n_head`, so never derive it |

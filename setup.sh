@@ -6,6 +6,18 @@ set -euo pipefail
 echo "==> Local Model Battery setup"
 echo "==> Python: $(python3 --version 2>&1 || echo 'not found')"
 
+PY_FLOOR_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 11) else 0)' 2>/dev/null || echo 0)
+if [ "$PY_FLOOR_OK" != "1" ]; then
+    echo "ERROR: this repo needs Python 3.11+ (scripts/lib/config.py uses tomllib)." >&2
+    echo "Found: $(python3 --version 2>&1 || echo 'not found')" >&2
+    echo "" >&2
+    echo "On macOS the system python3 is usually older. Install a newer one and either" >&2
+    echo "put it first on PATH or override it for this run, e.g.:" >&2
+    echo "  brew install python@3.12" >&2
+    echo "  PATH=\"\$(brew --prefix python@3.12)/libexec/bin:\$PATH\" bash setup.sh" >&2
+    exit 1
+fi
+
 if [ ! -d .venv ]; then
     echo "==> Creating virtual environment..."
     python3 -m venv .venv

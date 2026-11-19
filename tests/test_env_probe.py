@@ -295,11 +295,21 @@ class ToolVersionTest(unittest.TestCase):
 
 
 class MeminfoFixtureTest(unittest.TestCase):
-    """_read_meminfo against fixture files shaped like /proc/meminfo."""
+    """_read_meminfo against fixture files shaped like /proc/meminfo.
+
+    These fixtures model the Linux code path specifically, so the platform check is
+    pinned to "Linux" regardless of what this test actually runs on -- otherwise this
+    whole class silently tests nothing on a Mac, which takes the sysctl/vm_stat branch
+    and ignores MEMINFO_PATH entirely.
+    """
 
     def setUp(self):
         self._old_path = env_probe.MEMINFO_PATH
         self._fixture = None
+        self.platform_patch = mock.patch.object(env_probe.platform, "system",
+                                                 return_value="Linux")
+        self.platform_patch.start()
+        self.addCleanup(self.platform_patch.stop)
 
     def tearDown(self):
         env_probe.MEMINFO_PATH = self._old_path

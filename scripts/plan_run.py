@@ -95,6 +95,7 @@ def probe_from_args(args: argparse.Namespace):
     selected = _selected(args.legs)
     pid, engine = _endpoint_state(args, cfg)
     plan = plan_run(standard, legs, variables, profile, host, server, pilot, judge, selected,
+                    standard_path=STANDARD_FILE, profile_path=args.profile or "",
                     model_shape=shape, serving_pid=pid, engine=engine)
     return plan, host, server, pilot
 

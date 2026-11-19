@@ -244,7 +244,7 @@ class FitAndWindowTest(unittest.TestCase):
         self.assertIn("engine", " ".join(result.warnings).lower())
 
     def test_a_model_without_a_shape_is_probed_not_guessed(self):
-        result = plan(SHAPELESS)
+        result = plan(SHAPELESS, engine=EngineFacts())
         self.assertTrue(result.fit.estimate)
         self.assertEqual(runnable(result, "math500").ctx, 131072)
         self.assertTrue(any("shape is incomplete" in warning for warning in result.warnings))
@@ -254,6 +254,29 @@ class FitAndWindowTest(unittest.TestCase):
                  if item.variable == "ctx" and item.kind == KIND_CAPACITY][0]
         self.assertTrue(guess.needs_operator)
         self.assertIn("/props", guess.consequence)
+
+    def test_a_known_engine_window_ends_the_guessing(self):
+        # Once /props has reported the engine's real window, there is no reason to keep
+        # stamping a "guess until /props reports it" decision -- the standard's size still
+        # fits, so this is just a normal on-standard measurement row, same as plan(FITS).
+        result = plan(SHAPELESS, engine=ENGINE)
+        self.assertTrue(result.fit.estimate)
+        self.assertEqual(runnable(result, "math500").ctx, 131072)
+        row = decision(result, "ctx")
+        self.assertFalse(row.needs_operator)
+        self.assertFalse(row.is_deviation)
+        self.assertEqual(row.kind, KIND_MEASUREMENT)
+
+    def test_a_known_engine_window_smaller_than_standard_clamps_ctx(self):
+        tight_engine = replace(ENGINE, window=40000)
+        result = plan(SHAPELESS, engine=tight_engine)
+        self.assertEqual(runnable(result, "math500").ctx, 40000)
+        row = decision(result, "ctx")
+        self.assertEqual(row.kind, KIND_MEASUREMENT)
+        self.assertEqual(row.chosen, "40000")
+        self.assertEqual(row.standard_value, "131072")
+        self.assertTrue(row.needs_operator)
+        self.assertIn("/props", row.consequence)
 
     def test_footprint_is_unknown_without_a_shape(self):
         footprint = model_footprint(SHAPELESS, STANDARD)

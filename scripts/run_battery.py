@@ -588,7 +588,7 @@ def _run_for_real(plan: RunPlan, args: argparse.Namespace, probes, timer: float,
         print(f"\npreflight blocked: {', '.join(check.name for check in misses)}",
               file=sys.stderr)
         return 1
-    manifest.start(out_dir, plan, host, server, resume=args.resume)
+    manifest.start(out_dir, plan, host, server, resume=args.resume, pilot=pilot)
     (out_dir / "run-plan.json").write_text(json.dumps(plan.to_dict(), indent=2) + "\n")
     results = run_all(plan, args, out_dir, root)
     notes_path = manifest.close(out_dir, plan, results)
