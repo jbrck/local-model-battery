@@ -318,8 +318,8 @@ Judge quality on this stack, on the XP-001 task with a deliberately bad and a de
   wants it stopped he will say so; ask when unsure.
 - **sympy on a new Python.** Python 3.14 has no sympy wheels: use a 3.10-3.12 venv, or
   `pip install --no-binary sympy sympy`.
-- **`PYTHONPATH=` isolation** before benchmarks on Badger-001, to keep the Python 3.14 venv out of
-  the harness's imports.
+- **`PYTHONPATH=` isolation** before benchmarks on a host with more than one Python on `PATH`,
+  to keep an unrelated venv out of the harness's imports.
 
 ## Checks before calling a run done
 
