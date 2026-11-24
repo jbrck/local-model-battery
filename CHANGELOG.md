@@ -6,10 +6,18 @@ New leg: `ctxspeed`, decode speed against context depth.
 
 **Added**
 - `scripts/ctxspeed_bench.py` measures decode tokens per second as the prompt grows (512 up to
-  the served window), on free prose and on a verbatim copy of the context. A streaming client
+  1048576), on free prose and on a verbatim copy of the context. It does not trust the served
+  window: it climbs until a rung is refused, clipped, timed out or crashes the server, then
+  bisects to within 4096 tokens. The result's `ceiling` block names the deepest depth that
+  worked, the first that failed and why, so the leg reports what the host takes. Before it
+  climbs it reads the server's own window from `/props` and does not send rungs that window can
+  only refuse, so no hour goes on a prefill that is certain to fail; the top rung lands at the
+  window's usable edge. The result says when the window, not the hardware, ended the climb.
+  `--ignore-window` tries every rung anyway. A streaming client
   (`scripts/lib/stream.py`) splits time to first token from decode time, so prefill no longer
-  hides inside a whole-body timing. Filler comes from the bundled datasets, shuffled by seed and
-  never repeated inside a prompt, so a speculative drafter cannot win on repetition.
+  hides inside a whole-body timing. Filler comes from the bundled datasets, shuffled by seed. A prompt past one corpus pass
+  (about a million characters) takes more passes with the words reshuffled inside each piece,
+  so no run of words repeats and a speculative drafter cannot win on repetition.
 - The result block carries `per_depth` (median rate, retention against the shallowest depth,
   prefill rate, copy ratio) and `per_trial`. Drafter on versus off is two runs on two server
   launches, compared by `per_depth`.

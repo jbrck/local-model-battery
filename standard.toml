@@ -59,7 +59,7 @@ lcb = 100
 lcb_workers = 4       # LCB's sandboxed code evaluation. It never touches the model.
 hermesagent20 = 20
 writing = 138
-ctxspeed = 24          # six rungs, two tasks, two trials: the ladder a 245760 window gets
+ctxspeed = 32          # eight rungs, two tasks, two trials; a bisect at the edge adds a few single trials
 
 [budget]
 headroom = 1.25       # budget = max(floor, headroom * items * cap / pilot_tps)
@@ -80,7 +80,7 @@ toolbench = 10800
 mmlu = 28800
 hermesagent20 = 14400
 lcb = 28800
-ctxspeed = 10800      # deep prefill dominates; a 27 tok/s box can spend an hour on the top rung
+ctxspeed = 28800      # deep prefill dominates: four trials at 1M tokens, each an hour on a slow box
 writing = 0
 
 [budget.items]
@@ -98,7 +98,7 @@ toolbench = 69
 mmlu = 500
 hermesagent20 = 20
 lcb = 100
-ctxspeed = 24
+ctxspeed = 32
 writing = 138
 
 [timeouts]

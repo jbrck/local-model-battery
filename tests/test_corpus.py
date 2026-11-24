@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from scripts.lib.corpus import (JOINER, build_context, corpus_chars, corpus_hash,
+from scripts.lib.corpus import (JOINER, build_context, corpus_chars, corpus_hash, corpus_pass,
                                 load_corpus)
 
 PIECES = [f"piece {index:03d} " + "lorem ipsum dolor " * 4 for index in range(60)]
@@ -46,9 +46,28 @@ class BuildContextTest(unittest.TestCase):
         self.assertEqual(len(marks), len(set(marks)))
         self.assertEqual(text.count("piece 007 "), 1)
 
-    def test_asking_for_more_than_the_corpus_holds_raises(self):
+    def test_asking_for_more_than_one_pass_keeps_going_to_the_full_length(self):
+        want = corpus_chars(PIECES) * 3
+        text = build_context(PIECES, want, seed=1)
+        self.assertLessEqual(len(text), want)
+        self.assertGreater(len(text), want - 40)
+
+    def test_a_second_pass_shares_no_run_of_words_with_the_first(self):
+        pieces = [" ".join(f"w{index}x{word}" for word in range(30)) for index in range(40)]
+        first = corpus_pass(pieces, 5, 0).split()
+        second = corpus_pass(pieces, 5, 1).split()
+        run = 6
+        seen = {tuple(first[i:i + run]) for i in range(len(first) - run)}
+        repeats = sum(tuple(second[i:i + run]) in seen for i in range(len(second) - run))
+        self.assertEqual(repeats, 0)
+
+    def test_a_second_pass_keeps_the_same_words(self):
+        self.assertEqual(sorted(corpus_pass(PIECES, 5, 0).split()),
+                         sorted(corpus_pass(PIECES, 5, 1).split()))
+
+    def test_an_empty_corpus_cannot_supply_filler(self):
         with self.assertRaises(ValueError):
-            build_context(PIECES, corpus_chars(PIECES) + 1, seed=1)
+            build_context([], 100, seed=1)
 
     def test_zero_characters_is_an_empty_string(self):
         self.assertEqual(build_context(PIECES, 0, seed=1), "")

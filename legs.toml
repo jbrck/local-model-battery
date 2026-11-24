@@ -286,7 +286,7 @@ known_failures = [
 [[leg]]
 id = "ctxspeed"
 name = "Context-depth decode speed"
-measures = "decode tokens per second as the prompt grows, on free prose and on a verbatim copy, with prefill timed apart"
+measures = "decode tokens per second as the prompt grows until the server stops taking it, on free prose and on a verbatim copy, with prefill timed apart; reports the deepest prompt that worked"
 scoring = "streamed timing; median decode rate per task and depth, retention against the shallowest depth; a trial is valid when the prompt landed within 10% of its depth and the window filled"
 harness = "native"
 implementation = "in_repo"
@@ -300,8 +300,8 @@ resume = "done_marker"
 comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
 known_failures = [
   "one run is one engine configuration; drafter on versus off is two runs on two server launches, compared by per_depth, because a leg cannot restart the server",
-  "the ladder stops at the served window, so a 131072 window never reaches the 200000 rung; serve a larger window to measure it",
-  "the first byte arrives after prefill, so a host with slow prefill needs the 3600 second time-to-first-token allowance",
+  "the leg reads the window from /props and skips rungs past it, so the ceiling it reports is the launch setting, not the hardware; relaunch with a larger window to look further, or pass --ignore-window to send every rung",
+  "the first byte arrives after prefill, so a host with slow prefill needs the 7200 second time-to-first-token allowance; a timeout at depth is reported as a hardware limit",
   "a model that ignores the copy instruction produces a copy_ratio near zero and the copy rows read as prose rows",
 ]
 

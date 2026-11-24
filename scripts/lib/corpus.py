@@ -25,6 +25,7 @@ CORPUS_FILES = (
 )
 MIN_PIECE_CHARS = 40
 JOINER = "\n\n"
+PASS_SEED_STRIDE = 1_000_003
 
 
 def _strings(node: object) -> Iterator[str]:
@@ -63,15 +64,42 @@ def corpus_hash(corpus: list[str]) -> str:
     return digest.hexdigest()[:16]
 
 
+def corpus_pass(corpus: list[str], seed: int, pass_number: int) -> str:
+    """One pass over the corpus in a seeded order.
+
+    Pass 0 keeps every piece intact. A later pass also shuffles the words inside each piece,
+    so a second trip through the same text shares no run of words with the first. A drafter
+    that copies from earlier context would otherwise find the repeat and read fast at depth.
+    """
+    rng = random.Random(seed + pass_number * PASS_SEED_STRIDE)
+    order = list(corpus)
+    rng.shuffle(order)
+    if pass_number == 0:
+        return JOINER.join(order)
+    pieces = []
+    for piece in order:
+        words = piece.split()
+        rng.shuffle(words)
+        pieces.append(" ".join(words))
+    return JOINER.join(pieces)
+
+
 def build_context(corpus: list[str], chars: int, seed: int) -> str:
-    """A seeded shuffle of the corpus, cut to `chars` characters at a word boundary."""
+    """Seeded filler cut to `chars` characters at a word boundary.
+
+    One pass holds about a million characters. A longer ask keeps going with more passes
+    (see corpus_pass), so a million-token prompt is possible from the same data files.
+    """
     if chars <= 0:
         return ""
-    if chars > corpus_chars(corpus):
-        raise ValueError(f"asked for {chars} characters of filler, the corpus holds "
-                         f"{corpus_chars(corpus)}")
-    order = list(corpus)
-    random.Random(seed).shuffle(order)
-    text = JOINER.join(order)[:chars]
+    if not corpus:
+        raise ValueError("the corpus is empty, so there is no filler to build")
+    passes: list[str] = []
+    have = 0
+    while have < chars:
+        text = corpus_pass(corpus, seed, len(passes))
+        passes.append(text)
+        have += len(text) + len(JOINER)
+    text = JOINER.join(passes)[:chars]
     cut = text.rfind(" ")
     return text[:cut] if cut > chars // 2 else text

@@ -6,16 +6,17 @@ import os
 import tempfile
 import unittest
 
-from scripts.ctxspeed_bench import (DEFAULT_RUNGS, MIN_DECODE_TOKENS, Options, calibrate,
+from scripts.ctxspeed_bench import (BISECT_RESOLUTION, DEFAULT_RUNGS, MIN_DECODE_TOKENS,
+                                    Failure, Options, calibrate, ceiling_block, clipped,
                                     copy_ratio, count_trial, deepest_retention, depth_error,
-                                    ladder, main, parse_args, per_depth, pooled_decode_tps,
-                                    retention, run_leg, server_rate, split_csv, trial_row,
-                                    trial_seed)
+                                    failure_kind, ladder, main, parse_args, per_depth, plan_climb,
+                                    pooled_decode_tps, retention, run_leg, server_rate,
+                                    split_csv, trial_row, trial_seed, WINDOW_SLACK)
 from scripts.lib.harness import LegArgs, Tally, leg_config
 from scripts.lib.model import ChatResponse
 from scripts.lib.stream import StreamTiming
 from tests.stub_json import completion
-from tests.stub_sse import SseStub
+from tests.stub_sse import SseStub, prompt_of, prompt_tokens
 
 CORPUS = [f"unit {index:04d} " + "alpha beta gamma delta " * 3 for index in range(1500)]
 CAP = MIN_DECODE_TOKENS + 32
@@ -38,27 +39,18 @@ def timing(prompt: int = 1000, tokens: int = 200, ttft: float = 2.0, decode: flo
 
 
 class LadderTest(unittest.TestCase):
-    def test_the_standard_window_stops_below_the_window(self):
-        depths, skipped = ladder(131072, 1024, ())
-        self.assertEqual(depths[:4], [512, 8192, 32768, 65536])
-        self.assertLess(depths[-1], 131072 - 1024)
-        self.assertEqual(skipped, [])
-
-    def test_a_big_window_reaches_two_hundred_thousand(self):
-        depths, _ = ladder(245760, 1024, ())
-        self.assertEqual(depths, [512, 8192, 32768, 65536, 131072, 200000])
-
-    def test_a_small_window_climbs_only_as_far_as_it_fits(self):
-        depths, _ = ladder(16384, 1024, ())
-        self.assertEqual(depths[0], 512)
-        self.assertLessEqual(depths[-1], 16384 - 1024)
-
-    def test_asked_depths_that_cannot_fit_are_reported_not_dropped_silently(self):
-        depths, skipped = ladder(65536, 1024, (8192, 200000, 32768))
-        self.assertEqual((depths, skipped), ([8192, 32768], [200000]))
+    def test_the_default_ladder_reaches_every_depth_worth_asking_about(self):
+        for depth in (131072, 262144, 524288, 1048576):
+            self.assertIn(depth, DEFAULT_RUNGS)
 
     def test_the_default_ladder_is_ascending(self):
         self.assertEqual(list(DEFAULT_RUNGS), sorted(DEFAULT_RUNGS))
+
+    def test_no_depths_asked_gives_the_default_ladder(self):
+        self.assertEqual(ladder(()), list(DEFAULT_RUNGS))
+
+    def test_asked_depths_are_sorted_and_deduplicated_not_trimmed_to_a_window(self):
+        self.assertEqual(ladder((900000, 8192, 900000, 32768)), [8192, 32768, 900000])
 
 
 class ParseArgsTest(unittest.TestCase):
@@ -259,13 +251,143 @@ class RunLegTest(unittest.TestCase):
         self.assertTrue(all(abs(item["depth_error_pct"]) <= 5 for item in rows), rows)
         self.assertTrue(all(tokens > 0 for tokens in facts["wrapper_tokens"].values()))
 
-    def test_a_ladder_with_nothing_that_fits_runs_nothing(self):
-        stub = SseStub()
-        with stub, tempfile.TemporaryDirectory() as tmp:
-            tally, rows, facts = run_leg(args_for(stub, tmp, ctx=2048),
-                                         Options(depths=(100000,)), corpus=CORPUS)
-        self.assertEqual((tally.items, rows, facts["skipped_depths"]), (0, [], [100000]))
-        self.assertEqual(stub.seen, [])
+    def climb(self, stub: SseStub, depths: tuple[int, ...]) -> tuple:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.run_stub(stub, depths=depths, trials=1, tasks=("prose",))
+
+    def test_a_refused_prompt_ends_the_climb_and_names_the_window(self):
+        tally, rows, facts = self.climb(SseStub(window=20000), (500, 8000, 65536, 200000))
+        ceiling = facts["ceiling"]
+        self.assertEqual(ceiling["limit"], "rejected")
+        self.assertGreater(ceiling["first_failed_depth"], 20000)
+        self.assertEqual(facts["unreached_depths"], [200000])
+        self.assertIn("window", ceiling["meaning"])
+        self.assertEqual(tally.status(), "pass")
+
+    def test_the_bisect_lands_within_its_resolution_of_the_window(self):
+        _, rows, facts = self.climb(SseStub(window=20000), (500, 8000, 65536))
+        ceiling = facts["ceiling"]
+        self.assertLessEqual(ceiling["deepest_prompt_tokens_ok"], 20000)
+        self.assertGreater(ceiling["deepest_prompt_tokens_ok"], 20000 - 2 * BISECT_RESOLUTION)
+        self.assertLessEqual(ceiling["first_failed_depth"] - ceiling["deepest_depth_ok"],
+                             BISECT_RESOLUTION)
+
+    def test_a_clipped_prompt_is_reported_as_truncation_not_a_good_rung(self):
+        _, _, facts = self.climb(SseStub(window=12000, over="clip"), (500, 4000, 65536))
+        ceiling = facts["ceiling"]
+        self.assertEqual(ceiling["limit"], "truncated")
+        self.assertLessEqual(ceiling["deepest_prompt_tokens_ok"], 12000)
+
+    def test_a_dropped_connection_stops_the_climb_without_a_bisect(self):
+        stub = SseStub(window=12000, over="drop")
+        _, rows, facts = self.climb(stub, (500, 4000, 65536, 200000))
+        ceiling = facts["ceiling"]
+        self.assertEqual((ceiling["limit"], ceiling["deepest_depth_ok"],
+                          ceiling["first_failed_depth"]), ("server_failure", 4000, 65536))
+        self.assertEqual(facts["unreached_depths"], [200000])
+
+    def test_a_climb_that_never_fails_says_the_top_rung_is_a_floor(self):
+        _, rows, facts = self.climb(SseStub(), (500, 4000))
+        ceiling = facts["ceiling"]
+        self.assertEqual((ceiling["limit"], ceiling["deepest_depth_ok"],
+                          ceiling["first_failed_depth"]), ("ladder_top", 4000, None))
+        self.assertIn("floor", ceiling["meaning"])
+
+    def test_a_server_that_refuses_the_first_rung_is_a_failed_leg(self):
+        tally, rows, facts = self.climb(SseStub(window=100), (500, 4000))
+        self.assertEqual((rows, facts["ceiling"]["deepest_depth_ok"]), ([], 0))
+        self.assertEqual(tally.status(), "fail")
+
+    def test_a_reported_window_keeps_the_leg_from_sending_a_doomed_rung(self):
+        stub = SseStub(window=20000, report_window=True)
+        tally, rows, facts = self.climb(stub, (500, 8000, 65536, 200000))
+        ceiling = facts["ceiling"]
+        self.assertEqual(facts["served_window"], 20000)
+        self.assertEqual(ceiling["limit"], "served_window")
+        self.assertEqual(ceiling["skipped_beyond_window"], [65536, 200000])
+        self.assertIsNone(ceiling["first_failed_depth"])
+        self.assertIn("relaunch", ceiling["meaning"])
+        sizes = [prompt_tokens(prompt_of(body)) for body in stub.seen]
+        self.assertLessEqual(max(sizes), 20000)
+        self.assertEqual(tally.status(), "pass")
+
+    def test_the_top_rung_runs_near_the_window_edge(self):
+        stub = SseStub(window=20000, report_window=True)
+        _, _, facts = self.climb(stub, (500, 8000, 65536))
+        landed = facts["ceiling"]["deepest_prompt_tokens_ok"]
+        self.assertGreater(landed, 17000)
+        self.assertLessEqual(landed, 20000)
+
+    def test_ignore_window_sends_every_rung_anyway(self):
+        stub = SseStub(window=20000, report_window=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, _, facts = self.run_stub(stub, depths=(500, 8000, 65536), trials=1,
+                                        tasks=("prose",), ignore_window=True)
+        self.assertEqual(facts["ceiling"]["limit"], "rejected")
+        self.assertEqual(facts["ceiling"]["skipped_beyond_window"], [])
+
+    def test_filler_past_one_corpus_pass_is_built_by_extra_passes(self):
+        _, rows, _ = self.climb(SseStub(), (60000,))
+        self.assertTrue(rows)
+        self.assertTrue(all(item["valid"] for item in rows), rows)
+
+
+class PlanClimbTest(unittest.TestCase):
+    RUNGS = [512, 8192, 131072, 262144, 524288, 1048576]
+
+    def test_with_no_window_every_rung_is_sent(self):
+        self.assertEqual(plan_climb(self.RUNGS, None, 2000), (self.RUNGS, []))
+
+    def test_rungs_past_the_window_are_held_back(self):
+        sent, beyond = plan_climb(self.RUNGS, 245760, 2000)
+        self.assertEqual(beyond, [262144, 524288, 1048576])
+        self.assertEqual(sent[:3], [512, 8192, 131072])
+
+    def test_a_top_rung_lands_at_the_usable_edge_of_the_window(self):
+        sent, _ = plan_climb(self.RUNGS, 245760, 2000)
+        self.assertEqual(sent[-1], int((245760 - 2000) * WINDOW_SLACK))
+        self.assertEqual(sent, sorted(sent))
+
+    def test_a_window_past_the_top_rung_holds_nothing_back_and_adds_no_rung(self):
+        self.assertEqual(plan_climb(self.RUNGS, 2_000_000, 2000), (self.RUNGS, []))
+
+    def test_a_window_smaller_than_the_reserve_sends_nothing(self):
+        sent, beyond = plan_climb(self.RUNGS, 1000, 2000)
+        self.assertEqual(sent, [])
+        self.assertEqual(beyond, self.RUNGS)
+
+
+class FailureKindTest(unittest.TestCase):
+    def test_a_client_error_is_a_refusal(self):
+        self.assertEqual(failure_kind(ChatResponse(status=400, error="HTTP 400")), "rejected")
+
+    def test_a_timeout_is_a_hardware_stop(self):
+        self.assertEqual(failure_kind(ChatResponse(error="timed out")), "timeout")
+
+    def test_no_status_and_no_timeout_is_a_server_failure(self):
+        self.assertEqual(failure_kind(ChatResponse(error="connection reset")), "server_failure")
+        self.assertEqual(failure_kind(ChatResponse(status=503, error="HTTP 503")), "server_failure")
+
+
+class ClippedTest(unittest.TestCase):
+    def test_an_undershoot_past_the_tolerance_is_a_clip(self):
+        self.assertTrue(clipped({"depth_error_pct": -12.0}))
+
+    def test_drift_inside_the_tolerance_is_not(self):
+        self.assertFalse(clipped({"depth_error_pct": -4.0}))
+        self.assertFalse(clipped({"depth_error_pct": 30.0}))
+
+    def test_an_unknown_error_is_not(self):
+        self.assertFalse(clipped({"depth_error_pct": None}))
+
+
+class CeilingBlockTest(unittest.TestCase):
+    def test_the_block_carries_the_failure_and_the_deepest_landed_prompt(self):
+        rows = [{"valid": True, "prompt_tokens": 9000}, {"valid": False, "prompt_tokens": 99000}]
+        block = ceiling_block(rows, 9000, Failure(20000, "rejected", "HTTP 400", 400))
+        self.assertEqual((block["deepest_depth_ok"], block["deepest_prompt_tokens_ok"],
+                          block["first_failed_depth"], block["limit"]),
+                         (9000, 9000, 20000, "rejected"))
 
 
 class MainTest(unittest.TestCase):
@@ -308,9 +430,13 @@ class MainTest(unittest.TestCase):
         self.assertIn(block["status"], ("fail", "partial"))
         self.assertEqual(block["tps"], 0.0)
 
-    def test_without_a_window_or_depths_there_is_no_ladder_to_build(self):
-        code, block, _ = self.run_main(SseStub(), [])
-        self.assertEqual((code, block), (2, {}))
+    def test_no_window_flag_is_needed_the_leg_finds_the_window_itself(self):
+        code, block, _ = self.run_main(
+            SseStub(window=20000),
+            ["--depths", "500,8000,65536", "--trials", "1", "--tasks", "prose"])
+        self.assertEqual(code, 0)
+        self.assertEqual(block["ceiling"]["limit"], "rejected")
+        self.assertLessEqual(block["ceiling"]["deepest_prompt_tokens_ok"], 20000)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,15 @@ Two workloads, because a speculative drafter behaves differently on each:
 `copy_ratio` per trial says how much of the output was really lifted from the context, so
 a model that ignores the copy instruction shows up as a prose-like row instead of passing.
 
+The ladder climbs until the server stops taking it. Before it starts, the leg asks the server
+for its window (`/props`) and drops the rungs that window can only refuse, so no time goes on a
+deep prefill that is certain to fail. A top rung goes at the window's usable edge. The window
+is the server's setting, not the hardware's limit: the result says so, and a launch with a
+larger window is how to look further. `--ignore-window` skips the check and tries every rung.
+The first failing rung ends the climb. When the server refused the prompt or cut it short, the leg bisects between the
+last good rung and the failed one, so the top lands within a few thousand tokens. The result
+carries a `ceiling` block: the deepest depth that worked, the first one that did not, and why.
+
 One run is one engine configuration. Drafter on versus off is two runs on two server
 configurations, compared by their `per_depth` tables: a leg cannot restart the server.
 """
@@ -29,21 +38,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.lib.corpus import (  # noqa: E402
     build_context, corpus_chars, corpus_hash, load_corpus)
 from scripts.lib.harness import (  # noqa: E402
-    LegArgs, Tally, add_leg_args, finish, leg_config, thinking_body)
+    LegArgs, Tally, add_leg_args, finish, is_timeout, leg_config, thinking_body)
+from scripts.lib.model import ChatResponse  # noqa: E402
+from scripts.lib.server_probe import probe_server  # noqa: E402
 from scripts.lib.stream import StreamTiming, stream_chat  # noqa: E402
 
 LEG_ID = "ctxspeed"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_RUNGS = (512, 8192, 32768, 65536, 131072, 200000)
+DEFAULT_RUNGS = (512, 8192, 32768, 65536, 131072, 262144, 524288, 1048576)
 DEFAULT_TASKS = ("prose", "copy")
 DEFAULT_TRIALS = 2
-# The top rung is this share of the room left after the decode window, because the
-# characters-per-token estimate is good to a few percent and the server rejects overflow.
-TOP_RUNG_SHARE = 0.9
-TOP_RUNG_STEP = 1024
-# A requested depth must still fit with this much slack for the estimate's error.
-FIT_SLACK = 1.05
+# The usable share of the served window after the decode room and wrapper are taken out. The
+# characters-per-token estimate is good to a few percent, so the top rung keeps a margin.
+WINDOW_SLACK = 0.97
+# The bisect stops when the last good and first failed depths are this close.
+BISECT_RESOLUTION = 4096
+# Failures that mean the server took the request and refused or clipped the prompt, so the
+# edge is a value the bisect can narrow. A timeout or a crash is a hardware stop instead.
+EDGE_KINDS = ("rejected", "truncated")
+LIMIT_MEANING = {
+    "ladder_top": "every rung ran; the top rung is a floor, not the ceiling",
+    "served_window": "every rung the server's window allows ran; the window is a launch setting, "
+                     "not the hardware limit, so relaunch with a larger window to look further",
+    "rejected": "the server refused a prompt past this depth, usually its served window; "
+                "relaunch with a larger window to look further",
+    "truncated": "the server clipped the prompt at this depth instead of refusing it",
+    "timeout": "no first token inside the prefill allowance: a practical hardware limit",
+    "server_failure": "the request failed without a refusal: out of memory or a crashed server",
+}
 # A trial counts when the prompt landed within this share of its target depth.
 DEPTH_TOLERANCE = 0.10
 # Fewer output tokens than this is too short a window to call a rate.
@@ -52,7 +75,7 @@ PROBE_CHARS = 16000
 # A streamed request sends its first byte only after prefill, so the socket timeout is the
 # time to first token. The per-case timeout the planner derives is sized for decode and
 # would clip a deep prefill on a slow host, which is a hidden cap by another name.
-PREFILL_TIMEOUT_FLOOR_S = 3600
+PREFILL_TIMEOUT_FLOOR_S = 7200
 FALLBACK_CHARS_PER_TOKEN = 3.5
 WARMUP_TOKENS = 64
 COPY_GRAM = 6
@@ -76,6 +99,7 @@ class Options:
     depths: tuple[int, ...] = ()
     trials: int = DEFAULT_TRIALS
     tasks: tuple[str, ...] = DEFAULT_TASKS
+    ignore_window: bool = False
 
 
 def split_csv(text: str) -> list[str]:
@@ -88,12 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Decode speed against context depth")
     add_leg_args(parser)
     parser.add_argument("--depths", default="",
-                        help="comma-separated prompt depths in tokens; default is a ladder "
-                             "up to the served window")
+                        help="comma-separated prompt depths in tokens; default climbs 512 "
+                             "up to 1048576 until the server stops taking the prompt")
     parser.add_argument("--trials", type=int, default=DEFAULT_TRIALS,
                         help="requests per depth and task, each on different filler")
     parser.add_argument("--tasks", default=",".join(DEFAULT_TASKS),
                         help="comma-separated: prose, copy")
+    parser.add_argument("--ignore-window", action="store_true",
+                        help="try every rung even past the window the server reports")
     return parser
 
 
@@ -103,35 +129,17 @@ def parse_args(argv: list[str] | None = None) -> tuple[LegArgs, Options]:
     values = vars(parser.parse_args(argv))
     options = Options(depths=tuple(int(item) for item in split_csv(values.pop("depths"))),
                       trials=max(1, values.pop("trials")),
-                      tasks=tuple(split_csv(values.pop("tasks"))))
+                      tasks=tuple(split_csv(values.pop("tasks"))),
+                      ignore_window=values.pop("ignore_window"))
     unknown = [name for name in options.tasks if name not in TASKS]
     if unknown:
         parser.error(f"unknown task {unknown}; choose from {sorted(TASKS)}")
     return LegArgs(**values), options
 
 
-def requested_ladder(room: int, requested: tuple[int, ...]) -> tuple[list[int], list[int]]:
-    """(asked depths that fit, asked depths that cannot), each ascending."""
-    asked = sorted(set(requested))
-    fits = [depth for depth in asked if depth * FIT_SLACK <= room]
-    return fits, [depth for depth in asked if depth not in fits]
-
-
-def default_ladder(room: int) -> list[int]:
-    """The standard rungs that fit, plus a top rung just under the window when there is space."""
-    top = int(room * TOP_RUNG_SHARE) // TOP_RUNG_STEP * TOP_RUNG_STEP
-    rungs = [depth for depth in DEFAULT_RUNGS if depth <= top]
-    if rungs and top >= rungs[-1] * 1.25:
-        rungs.append(top)
-    return rungs
-
-
-def ladder(ctx: int, decode_tokens: int, requested: tuple[int, ...]) -> tuple[list[int], list[int]]:
-    """(depths to run, depths skipped because they cannot fit the served window)."""
-    room = ctx - decode_tokens
-    if requested:
-        return requested_ladder(room, requested)
-    return default_ladder(room), []
+def ladder(requested: tuple[int, ...]) -> list[int]:
+    """The depths to climb, ascending: the ones asked for, or the default rungs."""
+    return sorted(set(requested)) if requested else list(DEFAULT_RUNGS)
 
 
 def build_prompt(context: str, task: str) -> str:
@@ -261,34 +269,165 @@ def run_trial(cfg, args: LegArgs, corpus: list[str], calibration: Calibration,
     return trial_row(task, depth, trial, prompt, context, timing), timing
 
 
+@dataclass
+class Failure:
+    """The request that ended a climb, with the row it produced."""
+
+    depth: int
+    kind: str
+    error: str
+    status: int | None
+
+
+def failure_kind(response: ChatResponse) -> str:
+    """Why a request failed: refused by the server, no first token in time, or something else."""
+    if response.status is not None and 400 <= response.status < 500:
+        return "rejected"
+    if is_timeout(response):
+        return "timeout"
+    return "server_failure"
+
+
+def clipped(row: dict) -> bool:
+    """True when the server took the request but counted a prompt shorter than its depth.
+
+    An undershoot past the depth tolerance cannot be calibration drift, so the server clipped.
+    """
+    error = row["depth_error_pct"]
+    return error is not None and error / 100 < -DEPTH_TOLERANCE
+
+
+def run_rung(cfg, args: LegArgs, corpus: list[str], calibration: Calibration,
+             options: Options, depth: int, tally: Tally, rows: list[dict],
+             sweep: bool = True) -> Failure | None:
+    """Run one rung's trials. Returns the failure that stopped it, or None when it all ran.
+
+    A bisect probe (sweep False) runs one trial of the first task: it only has to say whether
+    the depth works.
+    """
+    tasks = options.tasks if sweep else options.tasks[:1]
+    trials = options.trials if sweep else 1
+    for trial in range(trials):
+        for task in tasks:
+            row, timing = run_trial(cfg, args, corpus, calibration, task, depth, trial)
+            failed = not timing.response.ok
+            if failed or clipped(row):
+                kind = failure_kind(timing.response) if failed else "truncated"
+                error = row["error"] or f"prompt landed at {timing.prompt_tokens} tokens"
+                print(f"  {task:<5} depth {depth:>7} trial {trial + 1}: {kind}: {error[:120]}",
+                      flush=True)
+                return Failure(depth, kind, error, timing.response.status)
+            count_trial(tally, timing, row["valid"])
+            rows.append(row)
+            print(f"  {task:<5} depth {depth:>7} trial {trial + 1}: "
+                  f"{row['decode_tps']:>6} tok/s decode, ttft {row['ttft_s']}s, "
+                  f"prompt {row['prompt_tokens']}{'' if row['valid'] else '  (invalid)'}",
+                  flush=True)
+    return None
+
+
+def narrow_edge(cfg, args: LegArgs, corpus: list[str], calibration: Calibration,
+                options: Options, low: int, failure: Failure, tally: Tally,
+                rows: list[dict]) -> tuple[int, Failure]:
+    """Bisect between the last good depth and the first refused one.
+
+    Returns the deepest depth known good and the failure at the shallowest depth known bad.
+    A probe that fails some other way (timeout, crash) ends the search at once: a hardware
+    stop is not an edge a bisect can walk toward.
+    """
+    high = failure
+    while high.depth - low > BISECT_RESOLUTION:
+        mid = (low + high.depth) // 2
+        probe = run_rung(cfg, args, corpus, calibration, options, mid, tally, rows, sweep=False)
+        if probe is None:
+            low = mid
+        elif probe.kind in EDGE_KINDS:
+            high = probe
+        else:
+            return low, probe
+    return low, high
+
+
+def served_window(cfg) -> int | None:
+    """The window the server reports for itself, or None when it does not say."""
+    facts = probe_server(cfg, run_thinking=False, run_tools=False)
+    return facts.ctx if facts.ctx and facts.ctx > 0 else None
+
+
+def plan_climb(depths: list[int], window: int | None, reserve: int) -> tuple[list[int], list[int]]:
+    """Split the ladder into the rungs worth sending and the ones past the window.
+
+    `reserve` is the tokens a request needs besides the filler: the decode room and the wrapper.
+    Without a window every rung is sent. With one, a rung past the usable room is certain to be
+    refused, so it is not sent, and a rung at the usable edge goes on top so the climb ends
+    where the window does and not at the last rung that happened to fit.
+    """
+    if window is None:
+        return list(depths), []
+    usable = int((window - reserve) * WINDOW_SLACK)
+    sent = [depth for depth in depths if depth <= usable]
+    beyond = [depth for depth in depths if depth > usable]
+    if beyond and usable > max(sent, default=0):
+        sent.append(usable)
+    return sent, beyond
+
+
+def ceiling_block(rows: list[dict], good: int, failure: Failure | None,
+                  window: int | None = None, beyond: list[int] | None = None) -> dict:
+    """The climb's answer: deepest depth that worked, the first that did not, and why."""
+    landed = [row["prompt_tokens"] for row in rows if row["valid"]]
+    if failure:
+        kind = failure.kind
+    else:
+        kind = "served_window" if beyond else "ladder_top"
+    return {"deepest_depth_ok": good, "deepest_prompt_tokens_ok": max(landed, default=0),
+            "first_failed_depth": failure.depth if failure else None, "limit": kind,
+            "meaning": LIMIT_MEANING[kind], "served_window": window,
+            "skipped_beyond_window": list(beyond or []),
+            "error": failure.error[:200] if failure else ""}
+
+
 def run_leg(args: LegArgs, options: Options,
             corpus: list[str] | None = None) -> tuple[Tally, list[dict], dict]:
-    """Walk the ladder shallow to deep. Returns the tally, the trial rows and the run facts."""
+    """Climb the ladder shallow to deep until a rung fails. Returns the tally, the trial rows
+    and the run facts."""
     cfg = leg_config(args)
     cfg.timeout_s = max(args.timeout_s, PREFILL_TIMEOUT_FLOOR_S)
     corpus = corpus if corpus is not None else load_corpus(ROOT)
-    depths, skipped = ladder(args.ctx, args.cap, options.depths)
-    facts: dict = {"depths": depths, "skipped_depths": skipped,
-                   "corpus_chars": corpus_chars(corpus), "items_sha": corpus_hash(corpus)}
+    asked = ladder(options.depths)
+    facts: dict = {"unreached_depths": [], "corpus_chars": corpus_chars(corpus),
+                   "items_sha": corpus_hash(corpus)}
     tally, rows = Tally(), []
-    if not depths:
-        return tally, rows, facts
     warm_up(cfg, args)
     calibration = calibrate(cfg, args, corpus, options.tasks)
+    window = None if options.ignore_window else served_window(cfg)
+    reserve = args.cap + max(calibration.overhead.values(), default=0)
+    depths, beyond = plan_climb(asked, window, reserve)
+    facts["depths"] = depths
+    facts["served_window"] = window
+    if beyond:
+        tally.notes.append(f"server window {window}: rungs {beyond} not sent")
     facts["chars_per_token"] = round(calibration.chars_per_token, 3)
     facts["wrapper_tokens"] = calibration.overhead
     if calibration.note:
         tally.notes.append(calibration.note)
-    for depth in depths:
-        for trial in range(options.trials):
-            for task in options.tasks:
-                row, timing = run_trial(cfg, args, corpus, calibration, task, depth, trial)
-                count_trial(tally, timing, row["valid"])
-                rows.append(row)
-                print(f"  {task:<5} depth {depth:>6} trial {trial + 1}: "
-                      f"{row['decode_tps']:>6} tok/s decode, ttft {row['ttft_s']}s, "
-                      f"prompt {row['prompt_tokens']}{'' if row['valid'] else '  (invalid)'}",
-                      flush=True)
+    good = 0
+    failure: Failure | None = None
+    for position, depth in enumerate(depths):
+        failure = run_rung(cfg, args, corpus, calibration, options, depth, tally, rows)
+        if failure:
+            facts["unreached_depths"] = depths[position + 1:]
+            break
+        good = depth
+    if failure and good and failure.kind in EDGE_KINDS:
+        good, failure = narrow_edge(cfg, args, corpus, calibration, options, good, failure,
+                                    tally, rows)
+    if failure and not good:
+        # Nothing ran at all, so the failure is the result and must not read as a pass.
+        tally.record(ChatResponse(status=failure.status, error=failure.error))
+    if failure:
+        tally.notes.append(f"climb stopped at depth {failure.depth}: {failure.kind}")
+    facts["ceiling"] = ceiling_block(rows, good, failure, window, beyond)
     return tally, rows, facts
 
 
@@ -355,10 +494,6 @@ def deepest_retention(table: list[dict]) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args, options = parse_args(argv)
-    if args.ctx <= 0 and not options.depths:
-        print("--ctx is the served window and the ladder is built from it; pass --ctx or "
-              "--depths", file=sys.stderr)
-        return 2
     tally, rows, facts = run_leg(args, options)
     table = per_depth(rows)
     extra = {"per_trial": rows, "per_depth": table, **facts,

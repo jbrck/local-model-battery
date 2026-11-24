@@ -1,5 +1,8 @@
 """A local server that streams chat completions as events, with depth-dependent timing.
 
+`window` gives it a context limit. A prompt past it is refused with HTTP 400, silently
+clipped to the window, or dropped mid-request, depending on `over`.
+
 Prefill delay and per-token delay both grow with the prompt, so a test can assert that the
 leg reports decode rate falling with depth and time to first token rising. The copy task is
 answered by echoing the end of the reference text, so copy_ratio has something real to read.
@@ -38,12 +41,16 @@ class SseStub:
 
     def __init__(self, prefill_s_per_ktok: float = 0.0, token_s: float = 0.0,
                  token_s_per_ktok: float = 0.0, send_usage: bool = True,
-                 status: int = 200) -> None:
+                 status: int = 200, window: int = 0, over: str = "reject",
+                 report_window: bool = False) -> None:
         self.prefill_s_per_ktok = prefill_s_per_ktok
         self.token_s = token_s
         self.token_s_per_ktok = token_s_per_ktok
         self.send_usage = send_usage
         self.status = status
+        self.window = window
+        self.over = over
+        self.report_window = report_window
         self.seen: list[dict] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -52,6 +59,18 @@ class SseStub:
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server naming
+                if not (stub.report_window and stub.window and self.path == "/props"):
+                    self.send_error(404)
+                    return
+                payload = json.dumps({"default_generation_settings": {"n_ctx": stub.window},
+                                      "total_slots": 1}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
             def do_POST(self) -> None:  # noqa: N802 - http.server naming
                 length = int(self.headers.get("Content-Length") or 0)
                 stub.stream(self, json.loads(self.rfile.read(length)))
@@ -69,7 +88,16 @@ class SseStub:
             handler.send_error(self.status, "stub failure")
             return
         prompt = prompt_of(body)
-        ktok = prompt_tokens(prompt) / 1000
+        counted = prompt_tokens(prompt)
+        if self.window and counted > self.window:
+            if self.over == "reject":
+                handler.send_error(400, "prompt exceeds the context window")
+                return
+            if self.over == "drop":
+                handler.close_connection = True
+                return
+            counted = self.window
+        ktok = counted / 1000
         time.sleep(self.prefill_s_per_ktok * ktok)
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream")
@@ -82,7 +110,7 @@ class SseStub:
         self._send(handler, {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]})
         if self.send_usage:
             self._send(handler, {"choices": [], "timings": {"predicted_per_second": 1.0 / max(pause, 1e-6)},
-                                 "usage": {"prompt_tokens": prompt_tokens(prompt),
+                                 "usage": {"prompt_tokens": counted,
                                            "completion_tokens": count}})
         handler.wfile.write(b"data: [DONE]\n\n")
         handler.wfile.flush()
