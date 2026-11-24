@@ -64,11 +64,54 @@ def _extract_boxed(text: str) -> str | None:
     return text[brace + 1 : end - 1] if end else None
 
 
+def _extract_delimited(text: str, open_delim: str,
+                       close_delim: str) -> str | None:
+    """The content inside the LAST pair of a math delimiter (\\\\(...\\\\) or $...$).
+
+    The close delimiter is searched from the open onward so a stray open with no
+    close returns None rather than reaching past it.
+    """
+    idx = text.rfind(open_delim)
+    if idx == -1:
+        return None
+    end = text.find(close_delim, idx + len(open_delim))
+    if end == -1:
+        return None
+    return text[idx + len(open_delim) : end]
+
+
+def _latex_simplify(text: str) -> str:
+    """Bring \"\\\"-escaped LaTeX math to a plain-text-ish form sympy can read.
+
+    Applied to BOTH the gold and predicted sides, so a control-word that stays
+    unresolved cancels out. Only the tokens that appear in model final answers
+    are rewritten; everything unknown is left verbatim, and a \\frac{a}{b} that
+    is not converted cannot be simplified, so both sides fall to the string
+    compare rather than being mismatched by a partial conversion.
+    """
+    stage = text.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
+    stage = stage.replace("\\,", " ").replace("\\:", " ").replace("\\;", " ")
+    stage = stage.replace("\\left(", "(").replace("\\right)", ")")
+    stage = stage.replace("\\left[", "[").replace("\\right]", "]")
+    stage = stage.replace("\\cdot", "*").replace("\\times", "*")
+    stage = stage.replace("\\pi", "pi").replace("\\theta", "theta")
+    stage = stage.replace("\\ ", "").replace("\\quad", " ").replace("\\qquad", " ")
+    return stage
+
+
 def _extract_answer(text: str) -> str:
-    """Try to extract a boxed answer, else return the cleaned text."""
+    """Try to extract a boxed or inline-math answer, else return the cleaned text."""
     boxed = _extract_boxed(text)
     if boxed:
+        boxed = _latex_simplify(boxed)
         return boxed.strip()
+    # DeepSeek-style final answers are wrapped in \\(...\\) or $...$ (which the
+    # \\boxed{} scanner never sees). Keep the raw inline math when its delimiters
+    # are present, then let the trailing-text fallback handle prose around it.
+    for open_delim, close_delim in (("\\(", "\\)"), ("$", "$")):
+        delimited = _extract_delimited(text, open_delim, close_delim)
+        if delimited is not None:
+            return _latex_simplify(delimited).strip()
     text = text.strip()
     # Last line heuristics
     lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -83,8 +126,8 @@ def _extract_answer(text: str) -> str:
 
 def _grade_answer(gold: str, pred: str) -> bool:
     """Compare gold and predicted answers using sympy simplification."""
-    gold = _extract_answer(gold.strip())
-    pred = _extract_answer(pred.strip())
+    gold = _latex_simplify(_extract_answer(gold.strip()))
+    pred = _latex_simplify(_extract_answer(pred.strip()))
 
     if not pred or not gold:
         return False

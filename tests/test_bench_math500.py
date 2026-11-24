@@ -50,6 +50,31 @@ class BoxExtractionTest(unittest.TestCase):
         self.assertEqual(_extract_answer("So result:\n  23"), "23")
 
 
+class InlineMathTest(unittest.TestCase):
+    """DeepSeek-style \\\\(...\\\\) final answers, which \\\\boxed{} misses.
+
+    The real signal is the \\\\(...\\\\) form (161 of 308 live responses). A leading
+    $ is not trusted to open a math span on its own -- it collides with currency
+    (\"$78\") and unbalanced delimiters, so a lone $ falls to the text fallback.
+    """
+
+    def test_paren_delimited_answer_is_extracted(self):
+        self.assertEqual(_extract_answer(r"The radius is \(r=4\)."), "r=4")
+        self.assertEqual(_extract_answer(r"\(4+6=10\) square units."), "4+6=10")
+
+    def test_paren_delimited_grade_matches_the_solve(self):
+        self.assertTrue(_grade_answer("r=4", r"The radius is \(r=4\)."))
+
+    def test_pi_translates_on_both_sides(self):
+        # \pi rewrites to pi on gold and predicted alike, so they compare equal.
+        self.assertTrue(_grade_answer(r"\(\pi\)", r"\(\pi\)"))
+        self.assertTrue(_grade_answer(r"\(\theta\)", r"\(\theta\)"))
+
+    def test_untranslated_frac_still_falls_to_string_compare(self):
+        # A frac is not converted, so it cannot be mismatched by a partial rewrite.
+        self.assertTrue(_grade_answer(r"\(\frac{1}{2}\)", r"\(\frac{1}{2}\)"))
+
+
 class GradeTest(unittest.TestCase):
     def test_a_textually_equal_answer_passes_without_sympy(self):
         self.assertTrue(_grade_answer("42", r"The answer is $\boxed{42}$."))

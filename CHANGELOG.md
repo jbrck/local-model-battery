@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+MATH-500 grader reads inline-math final answers.
+
+**Changed**
+- `scripts/bench_math500.py` now takes a final answer wrapped in `\(...\)` as well as
+  `\boxed{}`, and rewrites common LaTeX (`\dfrac`, `\cdot`, `\pi`, spacing) on both gold and
+  prediction before the sympy compare. The prompt never asks for `\boxed{}`, so a model that
+  answers in prose or inline math scored near zero for format, not for the math.
+- A lone `$` is not trusted to open a math span (it collides with currency).
+
+**Comparability**
+- Scores from the old grader are lower for any model that does not box. The first run that
+  showed it: inkling-2-mini on Project Maya, 214/500 (42.8%) under the old grader, 267/500
+  (53.4%) under this one, 478/500 (95.6%) under a looser offline rescore that is not in the repo.
+  Regrade older runs from their saved outputs before comparing them with a run on this grader.
+- The prompt is unchanged.
+
 ## 2.0.0 — 2026-10-20
 
 Writing benchmark replaced. Pairwise prose ELO is gone.
