@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+New leg: `ctxspeed`, decode speed against context depth.
+
+**Added**
+- `scripts/ctxspeed_bench.py` measures decode tokens per second as the prompt grows (512 up to
+  the served window), on free prose and on a verbatim copy of the context. A streaming client
+  (`scripts/lib/stream.py`) splits time to first token from decode time, so prefill no longer
+  hides inside a whole-body timing. Filler comes from the bundled datasets, shuffled by seed and
+  never repeated inside a prompt, so a speculative drafter cannot win on repetition.
+- The result block carries `per_depth` (median rate, retention against the shallowest depth,
+  prefill rate, copy ratio) and `per_trial`. Drafter on versus off is two runs on two server
+  launches, compared by `per_depth`.
+
+**Comparability**
+- Keyed on `cap`, `ctx`, `thinking`, `seed` and `items_sha` (hash of the filler corpus).
+
+---
+
 MATH-500 grader reads inline-math final answers.
 
 **Changed**

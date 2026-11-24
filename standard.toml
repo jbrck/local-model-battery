@@ -20,6 +20,7 @@ prompt_headroom = 16384
 
 [caps.by_leg]
 # Per-leg override of caps.default. Empty means "use default".
+ctxspeed = 1024       # the decode window each depth trial measures, not a ceiling on a thought
 
 [serve]
 ctx = 131072          # the largest leg cap sets this floor
@@ -58,6 +59,7 @@ lcb = 100
 lcb_workers = 4       # LCB's sandboxed code evaluation. It never touches the model.
 hermesagent20 = 20
 writing = 138
+ctxspeed = 24          # six rungs, two tasks, two trials: the ladder a 245760 window gets
 
 [budget]
 headroom = 1.25       # budget = max(floor, headroom * items * cap / pilot_tps)
@@ -78,6 +80,7 @@ toolbench = 10800
 mmlu = 28800
 hermesagent20 = 14400
 lcb = 28800
+ctxspeed = 10800      # deep prefill dominates; a 27 tok/s box can spend an hour on the top rung
 writing = 0
 
 [budget.items]
@@ -95,6 +98,7 @@ toolbench = 69
 mmlu = 500
 hermesagent20 = 20
 lcb = 100
+ctxspeed = 24
 writing = 138
 
 [timeouts]

@@ -23,7 +23,7 @@ from scripts.lib.legs import (  # noqa: E402
 EXPECTED_IDS = (
     "selftest", "math500", "humaneval_plus", "gpqa_diamond", "instr_v2", "refusal",
     "reasoning", "ifeval", "ifbench", "toolbench", "mmlu", "hermesagent20", "lcb",
-    "writing",
+    "ctxspeed", "writing",
 )
 
 
@@ -47,7 +47,7 @@ class CatalogTest(unittest.TestCase):
         self.legs = load_legs(self.standard)
         self.raw = load_raw_legs()
 
-    def test_catalog_holds_the_fourteen_legs_the_reference_box_runs(self):
+    def test_catalog_holds_the_fifteen_legs_the_reference_box_runs(self):
         self.assertEqual(tuple(leg.id for leg in self.legs), EXPECTED_IDS)
 
     def test_item_counts_are_joined_from_the_standard(self):

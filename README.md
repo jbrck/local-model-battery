@@ -23,6 +23,7 @@ endpoint — llama.cpp, vLLM, Ollama, LiteLLM, or a hosted API. Two kinds of sco
 | Reasoning | `reasoning` | 8 tasks | whether the model emits a trace at all, and how many tokens it takes | trace presence and trace length |
 | Refusal battery | `refusal` | 70 prompts | harmful-request refusal, edgy-prompt discrimination, benign over-refusal | three separate counts, never averaged |
 | HermesAgent-20 | `hermesagent20` | 20 scenarios | end-to-end agentic work on real tasks | artifact checks in a Docker sandbox running a pinned agent ‡ |
+| Context-depth speed | `ctxspeed` | 6 depths × 2 tasks × 2 trials | decode tokens per second as the prompt grows to the served window, prefill timed apart | streamed timing, median per depth, retention against the shallowest depth |
 | Writing Suite v1 | `writing` | 138 tasks | instruction-following and craft on long-form prompts | blind rubric judge, 1-10 per criterion |
 
 ‡ needs data or tooling that this repo does not ship: the IFEval and tool-calling legs want

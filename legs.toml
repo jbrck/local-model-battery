@@ -284,6 +284,28 @@ known_failures = [
 ]
 
 [[leg]]
+id = "ctxspeed"
+name = "Context-depth decode speed"
+measures = "decode tokens per second as the prompt grows, on free prose and on a verbatim copy, with prefill timed apart"
+scoring = "streamed timing; median decode rate per task and depth, retention against the shallowest depth; a trial is valid when the prompt landed within 10% of its depth and the window filled"
+harness = "native"
+implementation = "in_repo"
+entry = "scripts/ctxspeed_bench.py"
+cap_var = "caps.by_leg.ctxspeed"
+ctx_need = 8192
+thinking = "required_off"
+thinking_effect = "decode rate does not depend on the channel; thinking stays off so the copy task answers on the content channel where copy_ratio reads it"
+prereqs = []
+resume = "done_marker"
+comparability_keys = ["cap", "ctx", "thinking", "seed", "items_sha"]
+known_failures = [
+  "one run is one engine configuration; drafter on versus off is two runs on two server launches, compared by per_depth, because a leg cannot restart the server",
+  "the ladder stops at the served window, so a 131072 window never reaches the 200000 rung; serve a larger window to measure it",
+  "the first byte arrives after prefill, so a host with slow prefill needs the 3600 second time-to-first-token allowance",
+  "a model that ignores the copy instruction produces a copy_ratio near zero and the copy rows read as prose rows",
+]
+
+[[leg]]
 id = "writing"
 name = "Writing Suite v1"
 measures = "instruction-following and craft on long-form prompts"
