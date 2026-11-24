@@ -5,13 +5,14 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.ctxspeed_bench import (BISECT_RESOLUTION, DEFAULT_RUNGS, MIN_DECODE_TOKENS,
-                                    Failure, Options, calibrate, ceiling_block, clipped,
+                                    Calibration, Failure, Options, calibrate, ceiling_block, clipped,
                                     copy_ratio, count_trial, deepest_retention, depth_error,
                                     failure_kind, ladder, main, parse_args, per_depth, plan_climb,
-                                    pooled_decode_tps, retention, run_leg, server_rate,
-                                    split_csv, trial_row, trial_seed, WINDOW_SLACK)
+                                    pooled_decode_tps, retention, run_leg, run_trial,
+                                    server_rate, split_csv, trial_row, trial_seed, WINDOW_SLACK)
 from scripts.lib.harness import LegArgs, Tally, leg_config
 from scripts.lib.model import ChatResponse
 from scripts.lib.stream import StreamTiming
@@ -330,6 +331,60 @@ class RunLegTest(unittest.TestCase):
         _, rows, _ = self.climb(SseStub(), (60000,))
         self.assertTrue(rows)
         self.assertTrue(all(item["valid"] for item in rows), rows)
+
+
+class RunTrialResizeTest(unittest.TestCase):
+    """A prompt that lands off its depth is resized once and the fix is kept."""
+
+    ACTUAL_CHARS_PER_TOKEN = 3.0
+    WRAPPER = 50
+
+    def fake_stream(self, calls: list[int]):
+        def stream(cfg, messages, **kwargs):
+            prompt = messages[0]["content"]
+            calls.append(len(prompt))
+            counted = self.WRAPPER + int(len(prompt) / self.ACTUAL_CHARS_PER_TOKEN)
+            return timing(prompt=counted)
+        return stream
+
+    def send(self, calibration: Calibration, trials: int = 2) -> tuple[list[dict], list[int]]:
+        calls: list[int] = []
+        rows = []
+        args = LegArgs(model="m", cap=CAP)
+        with mock.patch("scripts.ctxspeed_bench.stream_chat", self.fake_stream(calls)), \
+                mock.patch("scripts.ctxspeed_bench.build_prompt",
+                           lambda context, task: "x" * self.WRAPPER * 3 + context):
+            for trial in range(trials):
+                row, _ = run_trial(None, args, CORPUS, calibration, "prose", 4000, trial)
+                rows.append(row)
+        return rows, calls
+
+    def test_a_prompt_that_lands_off_its_depth_is_resized_and_sent_again(self):
+        calibration = Calibration(chars_per_token=4.0, overhead={"prose": self.WRAPPER})
+        rows, calls = self.send(calibration, trials=1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(rows[0]["valid"])
+        self.assertLess(abs(rows[0]["depth_error_pct"]), 5)
+
+    def test_the_resize_is_kept_for_the_depths_later_trials(self):
+        calibration = Calibration(chars_per_token=4.0, overhead={"prose": self.WRAPPER})
+        rows, calls = self.send(calibration, trials=2)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(4000, calibration.scale)
+        self.assertTrue(all(row["valid"] for row in rows))
+
+    def test_a_prompt_that_lands_on_its_depth_is_sent_once(self):
+        calibration = Calibration(chars_per_token=3.0, overhead={"prose": self.WRAPPER})
+        _, calls = self.send(calibration, trials=1)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_prompt_the_server_keeps_clipping_is_still_short_after_the_resize(self):
+        calibration = Calibration(chars_per_token=3.0, overhead={"prose": self.WRAPPER})
+        clip = lambda cfg, messages, **kwargs: timing(prompt=1000)
+        with mock.patch("scripts.ctxspeed_bench.stream_chat", clip):
+            row, _ = run_trial(None, LegArgs(model="m", cap=CAP), CORPUS, calibration,
+                               "prose", 4000, 0)
+        self.assertTrue(clipped(row))
 
 
 class PlanClimbTest(unittest.TestCase):

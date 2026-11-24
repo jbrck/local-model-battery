@@ -31,7 +31,7 @@ import hashlib
 import os
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -177,6 +177,7 @@ class Calibration:
     chars_per_token: float
     overhead: dict[str, int]
     note: str = ""
+    scale: dict[int, float] = field(default_factory=dict)
 
 
 def calibrate(cfg, args: LegArgs, corpus: list[str], tasks: tuple[str, ...] = DEFAULT_TASKS
@@ -259,13 +260,30 @@ def count_trial(tally: Tally, timing: StreamTiming, valid: bool) -> None:
 
 def run_trial(cfg, args: LegArgs, corpus: list[str], calibration: Calibration,
               task: str, depth: int, trial: int) -> tuple[dict, StreamTiming]:
-    """Build the filler for one rung, send it, and measure the stream."""
+    """Build the filler for one rung, send it, and measure the stream.
+
+    The calibration reads characters per token off one long slice, and a short slice can
+    tokenize differently. A prompt that lands off its depth is resized once from what the
+    server counted and sent again, and the fix is kept for the depth's later trials. A prompt
+    that still lands short after the resize was clipped by the server, not misjudged.
+    """
     seed = trial_seed(args, trial, TASKS_ORDER.index(task))
-    filler_tokens = max(depth - calibration.overhead.get(task, 0), 0)
-    context = build_context(corpus, int(filler_tokens * calibration.chars_per_token), seed)
-    prompt = build_prompt(context, task)
-    timing = stream_chat(cfg, [{"role": "user", "content": prompt}], max_tokens=args.cap,
-                         temperature=args.temperature, extra_body=thinking_body(args.thinking))
+    overhead = calibration.overhead.get(task, 0)
+    filler_tokens = max(depth - overhead, 0)
+    for attempt in range(2):
+        scale = calibration.scale.get(depth, 1.0)
+        context = build_context(
+            corpus, int(filler_tokens * calibration.chars_per_token * scale), seed)
+        prompt = build_prompt(context, task)
+        timing = stream_chat(cfg, [{"role": "user", "content": prompt}], max_tokens=args.cap,
+                             temperature=args.temperature,
+                             extra_body=thinking_body(args.thinking))
+        error = depth_error(depth, timing.prompt_tokens)
+        landed = timing.prompt_tokens - overhead
+        if (attempt or not timing.response.ok or error is None or landed <= 0
+                or abs(error) <= DEPTH_TOLERANCE):
+            break
+        calibration.scale[depth] = scale * filler_tokens / landed
     return trial_row(task, depth, trial, prompt, context, timing), timing
 
 
