@@ -393,6 +393,37 @@ class ScorerInterpreterTest(unittest.TestCase):
                 lcb_score.score(problems, done, args)
             self.assertTrue(os.path.exists(seen["argv"][0]))
 
+    def test_a_relative_output_dir_reaches_the_scorer_as_absolute_paths(self):
+        """The scorer runs inside the checkout, where a relative path points at nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "runs", "model", "legs")
+            os.makedirs(out)
+            checkout = os.path.join(tmp, "checkout")
+            os.makedirs(checkout)
+            args = mock.Mock(output_dir=os.path.join("runs", "model", "legs"), src=checkout,
+                             workers=1, exec_timeout=1, scorer_python=sys.executable)
+            seen = {}
+
+            class Completed:
+                returncode = 1
+
+            def fake_run(argv, **kwargs):
+                seen["argv"], seen["cwd"] = argv, kwargs["cwd"]
+                return Completed()
+
+            previous = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with mock.patch.object(lcb_score.subprocess, "run", side_effect=fake_run):
+                    lcb_score.score([{"question_id": "q1"}], {"q1": {"code": "print(1)"}}, args)
+            finally:
+                os.chdir(previous)
+            input_path, output_path = seen["argv"][-2:]
+            self.assertEqual(seen["cwd"], checkout)
+            self.assertTrue(os.path.isabs(input_path) and os.path.isabs(output_path))
+            self.assertTrue(os.path.exists(os.path.realpath(input_path)))
+            self.assertEqual(os.path.realpath(os.path.dirname(input_path)), os.path.realpath(out))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,8 +47,11 @@ def score(problems: list[dict], done: dict[str, dict],
     scorable, by_qid = scorable_pairs(problems, done)
     if not scorable:
         return {}, "no problem produced extractable code"
-    input_path = os.path.join(args.output_dir, "lcb-score-input.json")
-    output_path = os.path.join(args.output_dir, "lcb-score-output.json")
+    # The scorer runs with cwd=args.src, so a relative --output-dir would resolve inside the
+    # checkout and the worker would not find its own input. The orchestrator passes it relative.
+    output_dir = os.path.abspath(args.output_dir)
+    input_path = os.path.join(output_dir, "lcb-score-input.json")
+    output_path = os.path.join(output_dir, "lcb-score-output.json")
     payload = {"problems": [by_qid[qid] for qid, _ in scorable],
                "generations": [[code] for _, code in scorable],
                "workers": args.workers, "exec_timeout": args.exec_timeout}
