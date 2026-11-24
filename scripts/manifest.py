@@ -34,6 +34,10 @@ SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 
 # Pilot-derived, so a resume on the same configuration would look different for no reason.
 VOLATILE_DECISIONS = ("case_timeout",)
+# Readings of the box at plan time. They move whenever anything else touches the GPU, or the
+# engine is restarted, so a resume that compared them refused a run whose model, caps and
+# thinking had not changed. Kept in the manifest for the record, left out of the resume check.
+LIVE_MODEL_READINGS = ("vram_free_gb",)
 
 
 class ManifestMismatch(Exception):
@@ -44,6 +48,16 @@ def _digest(payload: object) -> str:
     """A stable md5 over a JSON-serializable structure."""
     blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.md5(blob).hexdigest()
+
+
+def resume_digest(config: dict) -> str:
+    """The configuration digest a resume compares: the config with live readings removed.
+
+    Works on the stored config dict, so a manifest written before this rule resumes too.
+    """
+    model = {key: value for key, value in (config.get("model") or {}).items()
+             if key not in LIVE_MODEL_READINGS}
+    return _digest({**config, "model": model})
 
 
 def env_snapshot(environ: dict | None = None) -> dict:
@@ -146,6 +160,17 @@ def _serve_hint(server: ServerFacts | None) -> str:
     return "not reported by the endpoint"
 
 
+def _check_configuration(previous: dict, payload: dict) -> None:
+    """Refuse a resume whose configuration moved, ignoring the live readings."""
+    if isinstance(previous.get("config"), dict) and isinstance(payload.get("config"), dict):
+        before, after = resume_digest(previous["config"]), resume_digest(payload["config"])
+    else:
+        before, after = previous.get("config_md5"), payload.get("config_md5")
+    if before != after:
+        raise ManifestMismatch(f"configuration changed since this run started "
+                               f"({before} -> {after})")
+
+
 def start(out_dir: Path, plan: RunPlan, host: HostFacts, server: ServerFacts | None,
           resume: bool = False, manifest: dict | None = None,
           pilot: PilotResult | None = None) -> Path:
@@ -157,11 +182,11 @@ def start(out_dir: Path, plan: RunPlan, host: HostFacts, server: ServerFacts | N
         previous = json.loads(path.read_text())
         if not resume:
             raise ManifestMismatch(f"{out_dir} already has a manifest; pass resume to continue")
-        for key, label in (("standard_md5", "standard"), ("profile_md5", "profile"),
-                           ("config_md5", "configuration")):
+        for key, label in (("standard_md5", "standard"), ("profile_md5", "profile")):
             if previous.get(key) != payload.get(key):
                 raise ManifestMismatch(f"{label} changed since this run started "
                                        f"({previous.get(key)} -> {payload.get(key)})")
+        _check_configuration(previous, payload)
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
 

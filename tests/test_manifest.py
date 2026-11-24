@@ -162,6 +162,25 @@ class StartTest(unittest.TestCase):
             start(self.out, moved, RICH, SERVER, resume=True)
         self.assertIn("configuration changed", str(caught.exception))
 
+    def test_a_resume_ignores_the_free_vram_reading(self):
+        """Free VRAM moves with any other process on the card; it is not the configuration."""
+        start(self.out, rich_plan(), RICH, SERVER)
+        path = self.out / MANIFEST_FILE
+        stored = json.loads(path.read_text())
+        stored["config"]["model"]["vram_free_gb"] = 123.45
+        path.write_text(json.dumps(stored))
+        self.assertTrue(start(self.out, rich_plan(), RICH, SERVER, resume=True).is_file())
+
+    def test_a_resume_still_refuses_a_moved_cap_when_vram_also_moved(self):
+        start(self.out, rich_plan(), RICH, SERVER)
+        path = self.out / MANIFEST_FILE
+        stored = json.loads(path.read_text())
+        stored["config"]["model"]["vram_free_gb"] = 123.45
+        stored["config"]["legs"]["mmlu"]["cap"] = 1
+        path.write_text(json.dumps(stored))
+        with self.assertRaises(ManifestMismatch):
+            start(self.out, rich_plan(), RICH, SERVER, resume=True)
+
     def test_a_recorded_manifest_is_reused_when_one_is_passed_in(self):
         payload = build_manifest(rich_plan(), RICH, SERVER)
         payload["note"] = "written by the orchestrator"
