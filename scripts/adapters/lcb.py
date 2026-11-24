@@ -36,6 +36,7 @@ DEFAULT_SCORER_PYTHON = ""
 LCB_CAP = 114688
 DEFAULT_MAX_HOURS = 8.0
 DEFAULT_STALL_MIN = 10
+NO_CODE_TAIL_CHARS = 600     # kept on a no-code record so the miss can be diagnosed later
 DEFAULT_MAX_FAILURES = 5
 DEFAULT_WORKERS = 4
 DEFAULT_EXEC_TIMEOUT = 6
@@ -138,6 +139,8 @@ def classify_response(qid: str, response: ChatResponse, helpers: Helpers,
     if record["code"]:
         return FailureKind.NONE, record
     record["error"] = "no code extracted"
+    record["finish_reason"] = response.finish_reason
+    record["tail"] = (response.content or response.reasoning or "")[-NO_CODE_TAIL_CHARS:]
     tally.failed += 1
     tally.errors.append(f"{qid}: no code extracted")
     return FailureKind.NO_CODE, record

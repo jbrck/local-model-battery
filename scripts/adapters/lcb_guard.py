@@ -31,7 +31,7 @@ class Guard:
         self.stall_min = stall_min
         self.max_failures = max_failures
         self.started_at = started_at if started_at is not None else time.monotonic()
-        self.last_code_at = self.started_at
+        self.last_answer_at = self.started_at
         self.engine_streak = 0
         self.no_code_streak = 0
 
@@ -45,12 +45,16 @@ class Guard:
             self.engine_streak += 1
             self.no_code_streak = 0
         elif kind is FailureKind.NO_CODE:
+            # The engine answered, it just gave no code. That is progress, not a stall:
+            # a reasoner running to its cap takes longer than the stall window on one
+            # problem. The no-code streak catches an extractor that never matches.
             self.no_code_streak += 1
             self.engine_streak = 0
+            self.last_answer_at = now
         else:
             self.engine_streak = 0
             self.no_code_streak = 0
-            self.last_code_at = now
+            self.last_answer_at = now
 
     def _verdict(self, now: float) -> GuardDecision:
         """Rule on the counters as they stand after one problem."""
@@ -61,8 +65,8 @@ class Guard:
                                  f"{self.no_code_streak} consecutive problems with no code")
         if now - self.started_at >= self.max_hours * 3600:
             return GuardDecision(True, f"wall clock reached the {self.max_hours:.1f}h budget")
-        if self.stall_min > 0 and now - self.last_code_at >= self.stall_min * 60:
-            return GuardDecision(True, f"stall: no extractable code for {self.stall_min} minutes")
+        if self.stall_min > 0 and now - self.last_answer_at >= self.stall_min * 60:
+            return GuardDecision(True, f"stall: no engine answer for {self.stall_min} minutes")
         return GuardDecision(False)
 
     def record(self, kind: FailureKind, now: float) -> GuardDecision:

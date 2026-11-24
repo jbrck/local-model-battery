@@ -176,12 +176,19 @@ class GuardTest(LegTest):
         self.assertEqual(block["scored"], 2)
         self.assertEqual(block["correct"], 0)
 
-    def test_the_stall_guard_fires_after_quiet_minutes(self):
+    def test_the_stall_guard_fires_when_the_engine_stops_answering(self):
         guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)
-        self.assertFalse(guard.record(FailureKind.NO_CODE, 60.0).stop)
-        decision = guard.record(FailureKind.NO_CODE, 11 * 60.0)
+        self.assertFalse(guard.record(FailureKind.ENGINE, 60.0).stop)
+        decision = guard.record(FailureKind.ENGINE, 11 * 60.0)
         self.assertTrue(decision.stop)
         self.assertIn("minutes", decision.reason)
+
+    def test_a_slow_answer_with_no_code_is_not_a_stall(self):
+        """One problem at the 114,688-token cap runs longer than the stall window."""
+        guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)
+        self.assertFalse(guard.record(FailureKind.NONE, 60.0).stop)
+        self.assertFalse(guard.record(FailureKind.NO_CODE, 60.0 + 11 * 60.0).stop)
+        self.assertFalse(guard.record(FailureKind.NONE, 60.0 + 23 * 60.0).stop)
 
     def test_a_no_code_streak_stops_the_leg(self):
         guard = Guard(max_hours=8.0, stall_min=10, max_failures=5, started_at=0.0)
@@ -227,6 +234,46 @@ class WorkerTest(unittest.TestCase):
         result = lcb_worker.run_metrics(payload, metrics, FakeProblem)
         self.assertEqual(result["pass@1"], 0.5)
         self.assertEqual(result["detail"], {"0": 1.0, "1": 0.0})
+
+
+class WorkerEntryTest(unittest.TestCase):
+    """The worker runs as `python lcb_worker.py <input> <output>`; the scorer builds that."""
+
+    def test_the_two_scorer_arguments_are_the_input_and_output_paths(self):
+        self.assertEqual(lcb_worker.paths_from(["in.json", "out.json"]),
+                         ("in.json", "out.json"))
+
+    def test_the_real_worker_scores_through_a_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = fake_checkout(os.path.join(tmp, "checkout"))
+            write_module(os.path.join(checkout, "lcb_runner", "benchmarks",
+                                      "code_generation.py"),
+                         "class CodeGenerationProblem:\n"
+                         "    def __init__(self, **fields):\n"
+                         "        self.fields = fields\n"
+                         "    def get_evaluation_sample(self):\n"
+                         "        return self.fields\n")
+            write_module(os.path.join(checkout, "lcb_runner", "evaluation", "__init__.py"), "")
+            write_module(os.path.join(checkout, "lcb_runner", "evaluation",
+                                      "compute_code_generation_metrics.py"),
+                         "def codegen_metrics(samples, generations, num_process_evaluate,\n"
+                         "                    timeout, debug):\n"
+                         "    detail = {str(i): 1.0 if 'PASS_ME' in g[0] else 0.0\n"
+                         "              for i, g in enumerate(generations)}\n"
+                         "    return {'pass@1': 0.5, 'detail': {'pass@1': detail}}, None, None\n")
+            payload = {"problems": [{"question_id": "q1"}, {"question_id": "q2"}],
+                       "generations": [["PASS_ME"], ["nope"]], "workers": 1, "exec_timeout": 6}
+            input_path = os.path.join(tmp, "in.json")
+            output_path = os.path.join(tmp, "out.json")
+            with open(input_path, "w") as handle:
+                json.dump(payload, handle)
+            result = lcb_score.subprocess.run(
+                [sys.executable, lcb_score.WORKER_SCRIPT, input_path, output_path],
+                cwd=checkout, env={**os.environ, "PYTHONPATH": checkout},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(output_path) as handle:
+                self.assertEqual(json.load(handle)["detail"], {"0": 1.0, "1": 0.0})
 
 
 def write_module(path: str, body: str) -> None:

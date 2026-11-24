@@ -111,6 +111,26 @@ def pack_of(run_data: dict) -> dict:
     return {}
 
 
+def endpoint_unreachable(pack: dict) -> bool:
+    """True when every scenario died because the sandbox could not reach the engine.
+
+    The runner finishes such a run as 20 infra failures. That is the setup, not the model:
+    it must never read as a score, and a rerun must not resume from it or reuse it.
+    """
+    scenarios = pack.get("scenarios", [])
+    return bool(scenarios) and all(
+        str(scenario.get("failure_mode") or "") in INFRA_MODES
+        and "unreachable" in str(scenario.get("detail") or "")
+        for scenario in scenarios)
+
+
+def set_stale_run_aside(save_json: str) -> None:
+    """Move an unreachable-endpoint run out of the way so the rerun starts clean."""
+    for path in (save_json, journal_path(save_json)):
+        if os.path.isfile(path):
+            os.replace(path, path + ".unreachable")
+
+
 def run_is_complete(pack: dict) -> bool:
     catalog = int(pack.get("catalog_scenario_count") or 0)
     return catalog > 0 and len(pack.get("scenarios", [])) >= catalog
@@ -158,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     extra: dict = {}
     run_data = load_run(save_json) or {}
     pack = pack_of(run_data)
+    if endpoint_unreachable(pack):
+        print(f"the run at {save_json} never reached the engine; setting it aside")
+        set_stale_run_aside(save_json)
+        run_data, pack = {}, {}
     if run_is_complete(pack):
         print(f"complete run found at {save_json}; reporting it without a rerun")
     else:
@@ -169,6 +193,13 @@ def main(argv: list[str] | None = None) -> int:
         pack = pack_of(run_data)
     if not pack:
         tally.notes.append("no hermesagent-20 output to score")
+    elif endpoint_unreachable(pack):
+        reason = (f"the sandbox could not reach the engine at {model_endpoint(args.endpoint)}; "
+                  f"set HERMESAGENT20_ENDPOINT to a bridge-reachable address "
+                  f"(scripts/tools/endpoint_bridge.py forwards one)")
+        tally.errors.append(reason)
+        extra["endpoint_unreachable"] = model_endpoint(args.endpoint)
+        extra["reason"] = reason
     else:
         extra["harness_version"] = score_pack(pack, tally)
         extra["case_timeout"] = args.timeout_s

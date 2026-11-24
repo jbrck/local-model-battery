@@ -1,0 +1,16 @@
+# Inkling 2 Mini UD-Q4_K_XL served by Project Maya's maya-ik2 engine on one 24 GB card.
+#
+# Shape (layers, KV heads, head_dim) comes from the GGUF header via --model-file. Only what
+# no reader can reach is typed here: the quant label, the drafter the serve loaded, and the
+# weight size on disk.
+
+id = "inkling-2-mini-maya"
+
+# Inkling-2-Mini-UD-Q4_K_XL.gguf is 17629759456 bytes / 1073741824.
+weights_gb = 16.42
+weight_quant = "UD-Q4_K_XL"
+quant = "UD-Q4_K_XL"
+
+# maya-ik2 loads a draft model plus prompt lookup (--drafting auto). Read off the launch config.
+spec_decode = "on"
+draft_model = "dspark-Inkling-2-Mini-Q8_0 + prompt lookup (maya --drafting auto)"
